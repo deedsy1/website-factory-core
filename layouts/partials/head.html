@@ -1,0 +1,38 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+{{/* Prevent theme flash */}}
+<script>
+  (function () {
+    try {
+      var saved = localStorage.getItem("theme");
+      var prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+      var theme = saved || (prefersDark ? "dark" : "light");
+      document.documentElement.setAttribute("data-theme", theme);
+    } catch (e) {}
+  })();
+</script>
+
+<title>{{ if .IsHome }}{{ .Site.Title }}{{ else }}{{ .Title }} · {{ .Site.Title }}{{ end }}</title>
+
+{{ $desc := "" }}
+{{ with .Params.description }}{{ $desc = . }}{{ end }}
+{{ if not $desc }}{{ with .Params.summary }}{{ $desc = . }}{{ end }}{{ end }}
+{{ if not $desc }}{{ with .Site.Params.factory.brand }}{{ $desc = printf "%s: calm, practical reassurance — not advice." . }}{{ end }}{{ end }}
+{{ if not $desc }}{{ $desc = "Calm, practical reassurance — not advice." }}{{ end }}
+
+<meta name="description" content="{{ $desc }}">
+<meta name="robots" content="index,follow">
+
+<meta property="og:title" content="{{ if .IsHome }}{{ .Site.Title }}{{ else }}{{ .Title }}{{ end }}">
+<meta property="og:description" content="{{ $desc }}">
+<meta property="og:type" content="{{ if .IsHome }}website{{ else }}article{{ end }}">
+{{ with .Permalink }}<meta property="og:url" content="{{ . }}">{{ end }}
+
+{{/* Dynamic theme pack CSS */}}
+{{ $pack := "calm-paper" }}
+{{ with site.Params.theme }}{{ with .pack }}{{ $pack = . }}{{ end }}{{ end }}
+{{ with site.Data.site }}{{ with .theme }}{{ with .pack }}{{ $pack = . }}{{ end }}{{ end }}{{ end }}
+
+<link rel="stylesheet" href="{{ (printf "css/themes/%s.css" $pack) | relURL }}">
+<link rel="stylesheet" href="/css/site.css">

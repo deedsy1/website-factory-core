@@ -1,0 +1,38 @@
+<header class="site-header">
+  <div class="header-inner">
+    <a class="brand" href="/">{{ .Site.Title }}</a>
+
+    <div class="header-actions">
+      <button
+        id="themeToggle"
+        class="theme-toggle"
+        type="button"
+        aria-label="Toggle dark mode"
+        title="Toggle dark mode"
+      >
+        <span class="theme-icon" aria-hidden="true">◐</span>
+      </button>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      var btn = document.getElementById("themeToggle");
+      if (!btn) return;
+
+      function setIcon() {
+        var t = document.documentElement.getAttribute("data-theme");
+        btn.setAttribute("aria-label", t === "dark" ? "Switch to light mode" : "Switch to dark mode");
+      }
+      setIcon();
+
+      btn.addEventListener("click", function () {
+        var current = document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+        var next = current === "dark" ? "light" : "dark";
+        document.documentElement.setAttribute("data-theme", next);
+        try { localStorage.setItem("theme", next); } catch (e) {}
+        setIcon();
+      });
+    })();
+  </script>
+</header>

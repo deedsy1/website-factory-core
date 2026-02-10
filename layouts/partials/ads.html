@@ -1,0 +1,20 @@
+{{/* Ads partial — safe for Cloudflare Pages */}}
+
+{{ $provider := .Site.Params.ads.provider | default "none" }}
+{{ $client := .Site.Params.ads.adsenseClient | default "" }}
+
+{{ if eq $provider "adsense" }}
+  {{ if $client }}
+    <script async
+      src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client={{ $client }}"
+      crossorigin="anonymous"></script>
+
+    <ins class="adsbygoogle"
+      style="display:block"
+      data-ad-client="{{ $client }}"
+      data-ad-slot="0000000000"
+      data-ad-format="auto"
+      data-full-width-responsive="true"></ins>
+    <script>(adsbygoogle = window.adsbygoogle || []).push({});</script>
+  {{ end }}
+{{ end }}

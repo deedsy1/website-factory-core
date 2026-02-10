@@ -1,0 +1,119 @@
+site:
+  title: Reality Checks
+  brand: Reality Checks
+  language_code: en-us
+  base_url: https://reality-checks-factory.pages.dev/
+  default_meta_description: Calm, practical reassurance — not advice.
+theme:
+  pack: calm-paper
+  font_sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial,
+    sans-serif
+  font_serif: ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif
+  content_max: 74ch
+  radius: 16px
+taxonomy:
+  hubs:
+  - id: work-career
+    label: Work & Career
+  - id: money-stress
+    label: Money & Stress
+  - id: burnout-load
+    label: Burnout & Load
+  - id: milestones
+    label: Milestones
+  - id: social-norms
+    label: Social Norms
+generation:
+  no_advice_notice: NO medical, legal, or financial advice.
+  forbidden_words:
+  - diagnose
+  - diagnosis
+  - prescribed
+  - guaranteed
+  - sue
+  page_types:
+  - is-it-normal
+  - checklist
+  - red-flags
+  - myth-vs-reality
+  - explainer
+  outline_h2:
+  - Intro
+  - Definitions and key terms
+  - Why this topic exists
+  - How people usually experience this
+  - How it typically works
+  - When this topic tends to come up
+  - Clarifying examples
+  - Common misconceptions
+  - Why this topic gets misunderstood online
+  - Related situations that feel similar
+  - Related topics and deeper reading
+  - Neutral summary
+  - FAQs
+  closing_reassurance_templates:
+  - If this is hitting a nerve, you're not alone — and you don't have to have it all
+    figured out today.
+  - You're not failing for feeling this. Start small, be kind to yourself, and keep
+    it simple.
+  - It's okay if this takes time. Tiny changes count more than perfect plans.
+  wordcount:
+    min: 900
+    ideal_min: 1100
+    ideal_max: 1600
+    max: 1900
+  hard_prohibitions:
+    no_dates: true
+    no_prices: true
+    no_advice: true
+    no_guarantees: true
+    no_first_person: true
+    no_calls_to_action: true
+    no_affiliate: true
+    neutral_comparisons_only: true
+  style_rules:
+    tone: neutral, encyclopedic
+    assume_beginner: true
+    no_hype: true
+    no_fear: true
+    max_sentences_per_paragraph: 3
+    headings_allowed:
+    - '##'
+    - '###'
+internal_linking:
+  enabled: true
+  same_hub_first: 3
+  other_hubs_fill: 3
+  min_links: 3
+  forbid_external: true
+ads:
+  provider: none
+  adsense_client: ''
+gates:
+  required_frontmatter:
+  - title
+  - slug
+  - summary
+  - description
+  - date
+  - hub
+  - page_type
+  - gen_version
+  - contract_hash
+  - prompt_hash
+  allow_extra_h2: false
+  wordcount_min: 800
+  wordcount_max: 2000
+  enforce_headings_only: true
+  max_sentences_per_paragraph: 3
+  min_internal_links: 3
+  forbid_external_links: true
+  no_click_here: true
+  no_first_person: true
+  no_dates: true
+  no_prices: true
+  no_guarantees: true
+  no_calls_to_action: true
+  no_affiliate: true
+  faq_min: 4
+  faq_max: 8

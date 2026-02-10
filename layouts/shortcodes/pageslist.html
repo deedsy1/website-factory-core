@@ -1,0 +1,7 @@
+{{/* List generated pages that declare matching hub param */}}
+{{ $hub := .Page.File.Dir | strings.TrimSuffix "/" | path.Base }}
+<ul>
+{{ range where site.RegularPages "Params.hub" $hub }}
+  <li><a href="{{ .RelPermalink }}">{{ .Title }}</a></li>
+{{ end }}
+</ul>

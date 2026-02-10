@@ -1,0 +1,36 @@
+{{/* 
+Smarter internal linking:
+- Prefer same hub
+- Then fill with other hubs
+- Never link to self
+- Max 6 links
+*/}}
+
+{{ $current := . }}
+{{ $hub := .Params.hub }}
+
+{{/* All other pages */}}
+{{ $pages := where .Site.RegularPages "Section" "pages" }}
+{{ $pages = where $pages "RelPermalink" "ne" .RelPermalink }}
+
+{{/* Same hub first */}}
+{{ $sameHub := where $pages "Params.hub" $hub | first 3 }}
+
+{{/* Other hubs */}}
+{{ $otherHub := where $pages "Params.hub" "ne" $hub | first 3 }}
+
+{{/* Combine */}}
+{{ $related := $sameHub | append $otherHub }}
+
+{{ if gt (len $related) 0 }}
+<section class="related">
+  <h2 class="related-title">Related checks</h2>
+  <ul class="related-list">
+    {{ range $related }}
+      <li>
+        <a href="{{ .RelPermalink }}">{{ .Title }}</a>
+      </li>
+    {{ end }}
+  </ul>
+</section>
+{{ end }}
