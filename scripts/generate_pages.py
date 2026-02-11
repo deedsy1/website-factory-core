@@ -37,6 +37,9 @@ SLEEP_SECONDS = float(os.getenv("SLEEP_SECONDS", "0.3"))
 CONTENT_ROOT = _sr("content/pages")
 MANIFEST_PATH = _sr("scripts/manifest.json")
 TITLES_POOL_PATH = _sr("scripts/titles_pool.txt")
+RETRY_TITLES_PATH = _sr("scripts/retry_titles.txt")
+FAILED_TITLES_PATH = _sr("scripts/failed_titles.txt")
+CACHE_DIR = _sr("scripts/cache")
 SITE_CONFIG_PATH = str(_sr(os.getenv("SITE_CONFIG", "data/site.yaml")))
 
 # Queue / plan
@@ -141,7 +144,7 @@ def call_kimi(system: str, prompt: str):
     }
 
     last_err = None
-    for attempt in range(3):
+    for attempt in range(5):
         r = requests.post(
             f"{BASE_URL}/chat/completions",
             headers=HEADERS,
@@ -152,7 +155,7 @@ def call_kimi(system: str, prompt: str):
             return r.json()["choices"][0]["message"]["content"]
 
         if r.status_code in (429, 500, 502, 503):
-            time.sleep(2 ** attempt)
+            time.sleep(min(60, (2 ** attempt)) + random.uniform(0, 0.25))
             continue
 
         last_err = r.text
@@ -445,6 +448,40 @@ def generate_one_page(title: str, system: str, page_prompt: str, cfg: dict, pinn
 def write_page(slug: str, data: dict, close: str, contract_hash: str, prompt_hash: str) -> None:
     page_dir = os.path.join(CONTENT_ROOT, slug)
     os.makedirs(page_dir, exist_ok=True)
+
+def _remove_one(path: Path, title: str) -> None:
+    if not path.exists():
+        return
+    lines = [l.rstrip("\n") for l in path.read_text(encoding="utf-8").splitlines()]
+    out = []
+    removed = False
+    for l in lines:
+        if (not removed) and l.strip() == title:
+            removed = True
+            continue
+        out.append(l)
+    path.write_text("\n".join(out).strip() + ("\n" if out else ""), encoding="utf-8")
+
+
+def mark_failed(title: str, reason: str) -> None:
+    FAILED_TITLES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with FAILED_TITLES_PATH.open("a", encoding="utf-8") as f:
+        f.write(f"{title}\t{reason}\n")
+    # move to retry list (de-duped)
+    existing = set()
+    if RETRY_TITLES_PATH.exists():
+        existing = {l.strip() for l in RETRY_TITLES_PATH.read_text(encoding="utf-8").splitlines() if l.strip()}
+    if title not in existing:
+        with RETRY_TITLES_PATH.open("a", encoding="utf-8") as f:
+            f.write(title + "\n")
+    # remove from pool so we don't spin
+    _remove_one(TITLES_POOL_PATH, title)
+
+
+def mark_done(title: str) -> None:
+    # remove from both retry + pool
+    _remove_one(RETRY_TITLES_PATH, title)
+    _remove_one(TITLES_POOL_PATH, title)
 
     def esc(s: str) -> str:
         return str(s).replace('"', r'\\"').strip()

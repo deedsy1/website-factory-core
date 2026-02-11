@@ -325,7 +325,9 @@ def main():
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "contract_hash": hashlib.sha256(("|".join(DEFAULT_OUTLINE_H2) + f"|{wc_min}-{wc_max}").encode("utf-8")).hexdigest()[:16],
     }
-    Path("scripts/bootstrap_receipt.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    rc = Path("scripts/bootstrap_receipt.json")
+    if not rc.exists():
+        rc.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
 
     print("\n===== BOOTSTRAP SUMMARY =====")
     print(f"Niche: {NICHE}")
