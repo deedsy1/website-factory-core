@@ -294,6 +294,118 @@ def _safe_write_kimi_dump(kind: str, attempt: int, *, content: str = "", envelop
         return
 
 
+
+def fallback_bootstrap_contract(niche: str, tone: str, title_count: int) -> dict:
+    """Deterministic fallback when the LLM/provider returns empty output.
+
+    This is intentionally conservative and boring: it produces a valid contract
+    shape so bootstrap can proceed and be re-run later when the provider is healthy.
+    """
+    niche = (niche or "").strip()
+    tone = (tone or "neutral, calm, beginner-friendly").strip()
+
+    # Deterministic theme choice from niche hash
+    h = hashlib.sha256(niche.encode("utf-8")).hexdigest()
+    idx = int(h[:8], 16) % max(1, len(THEME_PACKS))
+    theme_pack = THEME_PACKS[idx] if THEME_PACKS else "modern-sans"
+
+    # Title/brand defaults (kept short and punctuation-free)
+    base_words = re.sub(r"[^a-zA-Z0-9\s-]", "", niche).strip().split()
+    short = " ".join(base_words[:3]).strip() or "Evergreen Site"
+    site_title = short.title()
+    brand = (base_words[0].title() if base_words else "Site")
+
+    tagline = "Calm, practical explanations for everyday questions."
+    meta = "Evergreen guides and neutral explainers. Not advice."
+
+    hubs = [
+        {"id": "basics", "label": "Basics"},
+        {"id": "gear-guides", "label": "Gear Guides"},
+        {"id": "setup-installation", "label": "Setup & Installation"},
+        {"id": "troubleshooting", "label": "Troubleshooting"},
+        {"id": "comparisons", "label": "Comparisons"},
+        {"id": "safety-best-practices", "label": "Safety & Best Practices"},
+    ]
+
+    # Generate evergreen, non-advice, non-time-sensitive title pool
+    # Keep it global-friendly and avoid brands/prices/stats.
+    topic = niche if niche else "this topic"
+
+    templates = [
+        "What is {t}?",
+        "Is it normal to struggle with {t}?",
+        "Why {t} feels confusing",
+        "Common misconceptions about {t}",
+        "Beginner mistakes with {t}",
+        "How {t} usually works",
+        "{t}: definitions and key terms",
+        "{t}: myths vs reality",
+        "{t}: what to check first",
+        "{t}: simple troubleshooting steps",
+        "{t}: safety and best practices",
+        "{t}: comparisons that matter",
+        "{t}: setup basics explained",
+        "{t}: how to choose a starting point",
+        "{t}: what experienced people wish beginners knew",
+        "{t}: a calm step-by-step overview",
+        "{t}: signs you're overcomplicating it",
+        "{t}: what usually causes problems",
+        "{t}: what to do when results vary",
+        "{t}: questions to ask before you change anything",
+    ]
+
+    # Deterministic shuffle so niches vary but remain reproducible
+    rnd = random.Random(int(h[8:16], 16))
+    rnd.shuffle(templates)
+
+    titles = []
+    seen = set()
+    for tpl in templates:
+        title = tpl.format(t=topic).strip()
+        key = slugify(title)
+        if key and key not in seen:
+            seen.add(key)
+            titles.append(title)
+
+    # Expand with gentle variations until we hit title_count
+    fillers = [
+        "Definitions to know for {t}",
+        "What people mean when they say {t}",
+        "How to tell if {t} is the issue",
+        "What usually changes {t}",
+        "Why {t} feels harder than it should",
+        "When {t} matters most",
+        "What to expect from {t}",
+        "How to keep {t} simple",
+        "How to compare options for {t}",
+        "A neutral checklist for {t}",
+    ]
+    i = 0
+    while len(titles) < max(10, int(title_count or 0)):
+        tpl = fillers[i % len(fillers)]
+        title = tpl.format(t=topic)
+        # add a small suffix for uniqueness if needed
+        if title in titles:
+            title = f"{title} (guide)"
+        key = slugify(title)
+        if key not in seen:
+            seen.add(key)
+            titles.append(title)
+        i += 1
+        if i > 2000:  # safety bound
+            break
+
+    return {
+        "site_title": site_title,
+        "brand": brand,
+        "tagline": tagline,
+        "default_meta_description": meta,
+        "theme_pack": theme_pack,
+        "hubs": hubs,
+        "titles_pool": titles[: max(10, int(title_count or 0))],
+    }
+
+
 def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int = 1400) -> dict:
     if not API_KEY:
         raise RuntimeError("MOONSHOT_API_KEY is not set")
@@ -550,12 +662,17 @@ def main(site_slug: str = "", force_reset: bool = False):
         ],
     }
 
-    out = kimi_json(
-        system=system,
-        user=json.dumps(user, ensure_ascii=False),
-        temperature=TEMPERATURE,
-        max_tokens=MAX_OUTPUT_TOKENS,
-    )
+    try:
+        out = kimi_json(
+            system=system,
+            user=json.dumps(user, ensure_ascii=False),
+            temperature=TEMPERATURE,
+            max_tokens=MAX_OUTPUT_TOKENS,
+        )
+    except Exception as e:
+        print(f"[bootstrap] WARNING: LLM bootstrap failed ({type(e).__name__}: {e}). Using deterministic fallback.")
+        out = fallback_bootstrap_contract(NICHE, TONE, TITLE_COUNT)
+
 
     theme_pack = out.get("theme_pack")
     if theme_pack not in THEME_PACKS:
