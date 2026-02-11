@@ -214,7 +214,22 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
         # Success (HTTP), but we may still get non-JSON content on rare provider hiccups.
         if r.status_code < 400:
             try:
-                content = r.json()["choices"][0]["message"]["content"]
+                data = r.json()
+                msg = (data.get("choices", [{}])[0].get("message") or {})
+                content = (msg.get("content") or "")
+
+                # Some providers/models return tool/function calls with JSON in "arguments"
+                # instead of plain text in "content".
+                if not content:
+                    tool_calls = msg.get("tool_calls") or []
+                    if isinstance(tool_calls, list) and tool_calls:
+                        fn = (tool_calls[0].get("function") or {})
+                        content = fn.get("arguments") or ""
+                if not content:
+                    fn_call = (msg.get("function_call") or {})
+                    content = fn_call.get("arguments") or ""
+
+                content = str(content)
             except Exception as e:
                 last_err = f"Bad JSON response envelope: {type(e).__name__}: {e}"
                 if attempt == HTTP_MAX_TRIES - 1:
