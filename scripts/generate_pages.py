@@ -76,48 +76,38 @@ def _sr(rel: str) -> Path:
     return (SITE_ROOT / rel).resolve()
 
 
-BASE_URL = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1").rstrip("/")
-API_KEY = os.environ["MOONSHOT_API_KEY"]
-MODEL = os.getenv("KIMI_MODEL", "kimi-k2.5")
+# --- LLM provider configuration ----------------------------------------
+# We support multiple providers. The factory will prefer Gemini if GEMINI_API_KEY
+# is present; otherwise it falls back to Moonshot (Kimi) for backwards-compat.
+#
+# Gemini (recommended):
+#   export GEMINI_API_KEY=...
+#   export GEMINI_MODEL=gemini-2.5-flash
+#
+# Moonshot (legacy):
+#   export MOONSHOT_API_KEY=...
+#   export MOONSHOT_BASE_URL=https://api.moonshot.ai/v1
+#   export KIMI_MODEL=kimi-k2.5
+# -----------------------------------------------------------------------
 
-# Reliability knobs (env)
-# Keep these shared across bootstrap/factory so a single tuning works everywhere.
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "180"))
-CONNECT_TIMEOUT = int(os.getenv("CONNECT_TIMEOUT", "20"))
-HTTP_MAX_TRIES = int(os.getenv("KIMI_HTTP_MAX_TRIES", "6"))
-BACKOFF_BASE = float(os.getenv("KIMI_BACKOFF_BASE", "1.7"))
-FAIL_STOP = int(os.getenv("FAIL_STOP", "6"))  # stop after N consecutive title failures
+MOONSHOT_BASE_URL = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1").rstrip("/")
+MOONSHOT_API_KEY = os.environ.get("MOONSHOT_API_KEY", "")
+MOONSHOT_MODEL = os.getenv("KIMI_MODEL", "kimi-k2.5")
 
-PAGES_PER_RUN = int(os.getenv("PAGES_PER_RUN", "10"))
-MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", "25"))
-MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1600"))
-TEMPERATURE = float(os.getenv("TEMPERATURE", "1"))
-SLEEP_SECONDS = float(os.getenv("SLEEP_SECONDS", "0.3"))
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
-CONTENT_ROOT = _sr("content/pages")
-MANIFEST_PATH = _sr("scripts/manifest.json")
-TITLES_POOL_PATH = _sr("scripts/titles_pool.txt")
-RETRY_TITLES_PATH = _sr("scripts/retry_titles.txt")
-FAILED_TITLES_PATH = _sr("scripts/failed_titles.txt")
-CACHE_DIR = _sr("scripts/cache")
-SITE_CONFIG_PATH = str(_sr(os.getenv("SITE_CONFIG", "data/site.yaml")))
+def _llm_provider() -> str:
+    if GEMINI_API_KEY:
+        return "gemini"
+    if MOONSHOT_API_KEY:
+        return "moonshot"
+    return ""
 
-# Queue / plan
-PLAN_PATH = str(_sr(os.getenv("PLAN_PATH", "data/plan.yaml")))
+PROVIDER = _llm_provider()
 
-# Factory modes
-FACTORY_MODE = os.getenv("FACTORY_MODE", "generate").strip().lower()  # generate|regen
-REGEN_RULE = os.getenv("REGEN_RULE", "").strip()  # e.g. "version_lt:2" or "contract_mismatch"
-REGEN_HUB = os.getenv("REGEN_HUB", "").strip()
-REGEN_SLUGS = os.getenv("REGEN_SLUGS", "").strip()  # comma-separated
-GEN_VERSION = int(os.getenv("GEN_VERSION", "2"))
-BACKFILL_METADATA = os.getenv("BACKFILL_METADATA", "1").strip() == "1"
-
-HEADERS = {
-    "Authorization": f"Bearer {API_KEY}",
-    "Content-Type": "application/json",
-}
-
+# Headers are provider-specific. Never print keys.
+HEADERS = {"Content-Type": "application/json"}
 def resolve_site_config_path() -> str:
     """Prefer the single contract at data/site.yaml.
     Backward compatible: fall back to scripts/site_config.yaml if needed.
@@ -191,50 +181,220 @@ def parse_json_strict_or_extract(raw: str) -> dict:
         raise json.JSONDecodeError("No JSON object found", raw, 0)
     return json.loads(m.group(0))
 
-def call_kimi(system: str, prompt: str):
-    temp = TEMPERATURE
-    if "kimi" in (MODEL or "").lower():
+def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int = 1400) -> dict:
+    """Request a JSON object from the configured LLM provider.
+
+    Backwards-compatible name: older workflows/scripts call `kimi_json()`.
+    We now support:
+      - Gemini (preferred) via GEMINI_API_KEY / GEMINI_MODEL
+      - Moonshot/Kimi (legacy) via MOONSHOT_API_KEY / MOONSHOT_BASE_URL / KIMI_MODEL
+
+    This function is intentionally defensive:
+      - Retries on empty output, invalid envelopes, and non-JSON content
+      - Extracts JSON from prose/codefences/tool-call style payloads where possible
+      - Writes bounded debug dumps to scripts/_logs/llm/
+    """
+    provider = PROVIDER
+    if not provider:
+        raise RuntimeError("No LLM API key configured. Set GEMINI_API_KEY (recommended) or MOONSHOT_API_KEY (legacy).")
+
+    # Some Moonshot/Kimi models only accept temperature=1 (integer).
+    # We still accept env overrides for compatibility but clamp safely.
+    temp = temperature
+    if provider == "moonshot" and "kimi" in (MOONSHOT_MODEL or "").lower():
         temp = 1
 
-    payload = {
-        "model": MODEL,
-        "temperature": temp,
-        "max_tokens": MAX_OUTPUT_TOKENS,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ],
-    }
+    # Common retry knobs (keep env var names stable to avoid workflow drift)
+    http_max_tries = HTTP_MAX_TRIES
+    backoff_base = BACKOFF_BASE
+
+    def _sleep(attempt: int) -> float:
+        return min(60.0, (backoff_base ** attempt) + random.random())
 
     last_err = None
-    for attempt in range(HTTP_MAX_TRIES):
+
+    # Provider-specific request builder ------------------------------------------------
+    def _gemini_request_payload() -> tuple[str, dict, dict]:
+        # Gemini GenerateContent API (stable + doesn't require SDK)
+        # Docs: https://ai.google.dev/gemini-api/docs
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+
+        # Gemini doesn't have a strict "response_format=json_object" in the same way as
+        # OpenAI; we enforce JSON via prompt + robust extraction.
+        prompt = (
+            system.strip()
+            + "\n\n"
+            + "CRITICAL: Output MUST be a single valid JSON object. No markdown. No code fences. No commentary.\n"
+            + user.strip()
+        )
+
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": float(temp),
+                "maxOutputTokens": int(max_tokens),
+                # Keep deterministic-ish. TopP can stay default; Gemini is usually fine.
+            },
+        }
+        headers = {"Content-Type": "application/json"}
+        return url, headers, payload
+
+    def _moonshot_request_payload() -> tuple[str, dict, dict]:
+        url = f"{MOONSHOT_BASE_URL}/chat/completions"
+        headers = {"Authorization": f"Bearer {MOONSHOT_API_KEY}", "Content-Type": "application/json"}
+
+        payload = {
+            "model": MOONSHOT_MODEL,
+            "temperature": int(temp) if isinstance(temp, (int, float)) and int(temp) == 1 else float(temp),
+            "max_tokens": int(max_tokens),
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        return url, headers, payload
+
+    def _extract_text_from_response(provider_name: str, data: dict) -> str:
+        # Gemini: candidates[0].content.parts[].text
+        if provider_name == "gemini":
+            try:
+                cands = data.get("candidates") or []
+                if not cands:
+                    return ""
+                content = (cands[0].get("content") or {})
+                parts = content.get("parts") or []
+                out = []
+                for p in parts:
+                    if isinstance(p, dict) and isinstance(p.get("text"), str):
+                        out.append(p["text"])
+                return "".join(out).strip()
+            except Exception:
+                return ""
+
+        # Moonshot/OpenAI-style: choices[0].message.content (+ tool calls)
         try:
-            r = requests.post(
-                f"{BASE_URL}/chat/completions",
-                headers=HEADERS,
-                json=payload,
-                timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
-            )
-        except requests.RequestException as e:
-            last_err = str(e)
-            # treat network errors like retryable failures
-            sleep_s = min(60.0, (BACKOFF_BASE ** attempt)) + random.uniform(0, 0.25)
-            time.sleep(sleep_s)
-            continue
-        if r.status_code < 400:
-            return r.json()["choices"][0]["message"]["content"]
+            msg = (data.get("choices", [{}])[0].get("message") or {})
+            content = msg.get("content")
 
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, dict):
+                        if "text" in part and isinstance(part.get("text"), str):
+                            parts.append(part.get("text"))
+                        elif "content" in part and isinstance(part.get("content"), str):
+                            parts.append(part.get("content"))
+                    elif isinstance(part, str):
+                        parts.append(part)
+                content = "".join(parts).strip()
+
+            if content is None:
+                content = ""
+
+            if not str(content).strip():
+                tool_calls = msg.get("tool_calls") or []
+                if isinstance(tool_calls, list) and tool_calls:
+                    fn = (tool_calls[0].get("function") or {})
+                    content = fn.get("arguments") or ""
+
+            if not str(content).strip():
+                fn_call = (msg.get("function_call") or {})
+                content = fn_call.get("arguments") or ""
+
+            if not str(content).strip() and isinstance(msg.get("json"), (dict, str)):
+                content = msg.get("json")
+
+            return str(content or "").strip()
+        except Exception:
+            return ""
+
+    # Main retry loop ----------------------------------------------------------------
+    for attempt in range(http_max_tries):
+        if provider == "gemini":
+            url, headers, payload = _gemini_request_payload()
+        else:
+            url, headers, payload = _moonshot_request_payload()
+
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT))
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_err = f"{type(e).__name__}: {e}"
+            if attempt == http_max_tries - 1:
+                raise
+            sleep = _sleep(attempt)
+            print(f"HTTP error: {type(e).__name__} — retrying in {sleep:.1f}s")
+            time.sleep(sleep)
+            continue
+
+        # Retryable HTTP status codes
         if r.status_code in (408, 429, 500, 502, 503, 504):
-            sleep_s = min(60.0, (BACKOFF_BASE ** attempt)) + random.uniform(0, 0.25)
-            time.sleep(sleep_s)
+            last_err = f"HTTP {r.status_code}: {r.text[:2000]}"
+            _safe_write_kimi_dump(f"{provider}_http_{r.status_code}", attempt, content="", envelope=None, http_status=r.status_code, http_text=r.text, payload=payload)
+            if attempt == http_max_tries - 1:
+                break
+            sleep = _sleep(attempt)
+            print(f"HTTP {r.status_code} — retrying in {sleep:.1f}s")
+            time.sleep(sleep)
             continue
 
-        last_err = r.text
-        break
+        if r.status_code >= 400:
+            last_err = f"HTTP {r.status_code}: {r.text[:2000]}"
+            _safe_write_kimi_dump(f"{provider}_http_error", attempt, content="", envelope=None, http_status=r.status_code, http_text=r.text, payload=payload)
+            break
 
-    raise RuntimeError(last_err or "API retries exhausted")
+        # Parse provider envelope
+        try:
+            data = r.json()
+        except Exception as e:
+            last_err = f"Bad JSON response envelope: {type(e).__name__}: {e}"
+            _safe_write_kimi_dump(f"{provider}_bad_envelope", attempt, content="", envelope=None, http_status=r.status_code, http_text=r.text, payload=payload)
+            if attempt == http_max_tries - 1:
+                raise
+            sleep = _sleep(attempt)
+            print(f"Response parse error — retrying in {sleep:.1f}s")
+            time.sleep(sleep)
+            continue
 
+        content = _extract_text_from_response(provider, data)
+
+        if not str(content).strip():
+            last_err = "Empty model output"
+            _safe_write_kimi_dump(f"{provider}_empty", attempt, content="", envelope=data, http_status=r.status_code, http_text=r.text, payload=payload)
+            if attempt == http_max_tries - 1:
+                break
+            sleep = _sleep(attempt)
+            print(f"Model returned empty output (attempt {attempt+1}/{http_max_tries}) — retrying in {sleep:.1f}s")
+            time.sleep(sleep)
+            continue
+
+        try:
+            return parse_json_strict_or_extract(content)
+        except json.JSONDecodeError as e:
+            last_err = f"Model JSON decode error: {e}"
+            preview = (content or "").strip().replace("\n", " ")[:240]
+            print(f"Model returned non-JSON content (attempt {attempt+1}/{http_max_tries}): {preview}")
+            _safe_write_kimi_dump(f"{provider}_json_decode", attempt, content=content, envelope=data, http_status=r.status_code, http_text=r.text, payload=payload)
+
+            if attempt == http_max_tries - 1:
+                break
+            sleep = _sleep(attempt)
+            print(f"Retrying after non-JSON output in {sleep:.1f}s")
+            time.sleep(sleep)
+            continue
+
+    raise RuntimeError(last_err or f"{provider} API retries exhausted")
+
+
+def call_kimi(system: str, prompt: str) -> dict:
+    """Backwards-compatible wrapper for the site factory.
+
+    Despite the name, this can call Gemini (preferred) or Moonshot/Kimi (legacy),
+    depending on which API key is configured.
+    """
+    # Reuse the hardened JSON requester from bootstrap_site.py logic.
+    # (We keep a copy here to avoid cross-file imports in the thin-repo execution model.)
+    return kimi_json(system=system, user=prompt, temperature=TEMPERATURE, max_tokens=MAX_OUTPUT_TOKENS)
 
 def build_internal_link_hints(content_root: str = "content/pages", limit: int = 40) -> str:
     """
