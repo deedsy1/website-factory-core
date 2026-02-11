@@ -83,6 +83,7 @@ MODEL = os.getenv("KIMI_MODEL", "kimi-k2.5")
 # Reliability knobs (env)
 # Keep these shared across bootstrap/factory so a single tuning works everywhere.
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "180"))
+CONNECT_TIMEOUT = int(os.getenv("CONNECT_TIMEOUT", "20"))
 HTTP_MAX_TRIES = int(os.getenv("KIMI_HTTP_MAX_TRIES", "6"))
 BACKOFF_BASE = float(os.getenv("KIMI_BACKOFF_BASE", "1.7"))
 FAIL_STOP = int(os.getenv("FAIL_STOP", "6"))  # stop after N consecutive title failures
@@ -209,7 +210,7 @@ def call_kimi(system: str, prompt: str):
                 f"{BASE_URL}/chat/completions",
                 headers=HEADERS,
                 json=payload,
-                timeout=REQUEST_TIMEOUT,
+                timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
             )
         except requests.RequestException as e:
             last_err = str(e)

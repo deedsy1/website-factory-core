@@ -73,6 +73,12 @@ MODEL = os.getenv("KIMI_MODEL", "kimi-k2.5")
 
 HEADERS = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
 
+# Network + retry knobs (override via workflow env vars)
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "180"))
+CONNECT_TIMEOUT = int(os.getenv("CONNECT_TIMEOUT", "20"))
+HTTP_MAX_TRIES = int(os.getenv("KIMI_HTTP_MAX_TRIES", "6"))
+BACKOFF_BASE = float(os.getenv("KIMI_BACKOFF_BASE", "1.7"))
+
 SITE_PATH = Path(os.getenv("SITE_CONFIG", "data/site.yaml"))
 HUGO_PATH = Path("hugo.yaml")
 TITLES_POOL_PATH = _sr("scripts/titles_pool.txt")
@@ -242,9 +248,39 @@ def patch_hugo_yaml(site_cfg: dict):
 
     HUGO_PATH.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
-def main():
+def main(site_slug: str = "", force_reset: bool = False):
+    """Bootstrap a new site (or re-run safely).
+
+    If `site_slug` is provided, we operate under sites/<site_slug>/... to keep
+    multiple sites isolated.
+    """
+
+    # Work within the site folder if a slug is provided (keeps runs isolated)
+    if site_slug:
+        site_root = Path("sites") / site_slug
+        site_root.mkdir(parents=True, exist_ok=True)
+        os.chdir(site_root)
+
+    # Ensure expected folders exist in the *current* site directory
+    Path("scripts").mkdir(parents=True, exist_ok=True)
+    Path("data").mkdir(parents=True, exist_ok=True)
+
     if not NICHE:
         raise SystemExit("BOOTSTRAP_NICHE is required (e.g. 'work anxiety', 'caravan towing safety', etc).")
+
+    # Optional destructive reset
+    if force_reset:
+        for p in (Path(SITE_PATH), Path(TITLES_POOL_PATH), Path(MANIFEST_PATH)):
+            try:
+                if p.exists():
+                    p.unlink()
+            except Exception:
+                pass
+
+    # If this site is already bootstrapped, do nothing (idempotent + cheap)
+    if Path(SITE_PATH).exists() and Path(TITLES_POOL_PATH).exists() and not force_reset:
+        print(f"[bootstrap] Existing bootstrap detected for '{site_slug or Path.cwd().name}'. Skipping LLM calls.")
+        return
 
     existing = load_yaml(SITE_PATH)
 
@@ -399,8 +435,16 @@ def main():
     print(f"Site title: {site_title}")
     print(f"Theme pack: {theme_pack}")
     print(f"Titles written: {len(titles)} (target {TITLE_COUNT})")
-    print("Reset: manifest.json")
+    print("Receipt: scripts/bootstrap_receipt.json")
     print("=============================\n")
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--site-slug", default="", help="Folder under sites/, e.g. home-espresso-basics")
+    ap.add_argument(
+        "--force-reset",
+        action="store_true",
+        help="Wipe existing site.yaml / titles pool / bootstrap receipt for this site before bootstrapping",
+    )
+    args = ap.parse_args()
+    main(site_slug=args.site_slug.strip(), force_reset=bool(args.force_reset))
