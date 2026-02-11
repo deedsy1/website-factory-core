@@ -5,6 +5,7 @@ import re
 import json
 import time
 import hashlib
+import random
 from pathlib import Path
 
 import requests
@@ -159,8 +160,15 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
     }
 
     last_err = None
-    for attempt in range(3):
-        r = requests.post(f"{BASE_URL}/chat/completions", headers=HEADERS, json=payload, timeout=90)
+    for attempt in range(HTTP_MAX_TRIES):    try:
+        r = requests.post(f"{BASE_URL}/chat/completions", headers=HEADERS, json=payload, timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT))
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+        if attempt == HTTP_MAX_TRIES - 1:
+            raise
+        sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
+        print(f"HTTP error: {type(e).__name__} — retrying in {sleep:.1f}s")
+        time.sleep(sleep)
+        continue
         if r.status_code < 400:
             content = r.json()["choices"][0]["message"]["content"]
             return parse_json_strict_or_extract(content)
@@ -259,7 +267,7 @@ def main():
         ],
     }
 
-    out = kimi_json(system=system, user=json.dumps(user, ensure_ascii=False), temperature=1.0, max_tokens=2600)
+    out = kimi_json(system=system, user=json.dumps(user, ensure_ascii=False), temperature=1.0, max_tokens=MAX_OUTPUT_TOKENS)
 
     theme_pack = out.get("theme_pack")
     if theme_pack not in THEME_PACKS:
