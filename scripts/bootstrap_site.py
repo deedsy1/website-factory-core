@@ -478,15 +478,19 @@ def ensure_manifest_reset():
 def write_titles_pool(titles: list[str]):
     TITLES_POOL_PATH.parent.mkdir(parents=True, exist_ok=True)
     uniq = []
+    # IMPORTANT: De-dupe by the full normalized title, not by slug.
+    # Many titles share long prefixes; slugify() truncates to 60 chars,
+    # which can collapse distinct titles into the same key and accidentally
+    # shrink the pool (e.g. producing ~40 titles when TITLE_COUNT=300).
     seen = set()
     for t in titles:
         t = (t or "").strip()
         if not t:
             continue
-        s = slugify(t)
-        if s in seen:
+        key = re.sub(r"\s+", " ", t.lower()).strip()
+        if key in seen:
             continue
-        seen.add(s)
+        seen.add(key)
         uniq.append(t)
     TITLES_POOL_PATH.write_text("\n".join(uniq) + "\n", encoding="utf-8")
 
