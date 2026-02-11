@@ -14,6 +14,74 @@ def _slugify(s: str) -> str:
     return s or "site"
 
 
+def links_in_markdown(md: str) -> List[Tuple[str, str]]:
+    """Return list of (label, url) markdown links: [label](url)."""
+    if not md:
+        return []
+    out: List[Tuple[str, str]] = []
+    for m in re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", md):
+        label = (m.group(1) or "").strip()
+        url = (m.group(2) or "").strip()
+        if url:
+            out.append((label, url))
+    return out
+
+
+def _word_count(text: str) -> int:
+    """Rough word count for perf budgets."""
+    if not text:
+        return 0
+    return len(re.findall(r"\b\w+\b", text))
+
+
+def performance_budget(site_cfg: Dict, pages: List[Path]) -> None:
+    """Enforce page-count + total-word-count budgets.
+
+    Budgets come from either:
+      - env PERF_MAX_PAGES / PERF_MAX_WORDS (if set)
+      - site_cfg['gates']['max_pages'] / ['max_words'] (defaults set by bootstrap)
+
+    We treat each content/pages/<slug>/index.md as a "page".
+    """
+    gates = site_cfg.get("gates", {}) if isinstance(site_cfg, dict) else {}
+
+    env_max_pages = os.getenv("PERF_MAX_PAGES")
+    env_max_words = os.getenv("PERF_MAX_WORDS")
+    try:
+        max_pages = int(env_max_pages) if env_max_pages else int(gates.get("max_pages", 1000))
+    except Exception:
+        max_pages = 1000
+    try:
+        max_words = int(env_max_words) if env_max_words else int(gates.get("max_words", 600000))
+    except Exception:
+        max_words = 600000
+
+    page_count = len(pages)
+    if page_count > max_pages:
+        raise SystemExit(f"Performance budget: too many pages ({page_count}) > max_pages ({max_pages}).")
+
+    total_words = 0
+    for p in pages:
+        try:
+            md = p.read_text(encoding="utf-8")
+        except Exception:
+            md = p.read_text(errors="ignore")
+        body = md
+        # Drop front matter quickly
+        if body.startswith("---"):
+            parts = body.split("---", 2)
+            if len(parts) == 3:
+                body = parts[2]
+        total_words += _word_count(body)
+
+        # Small early-exit for speed
+        if total_words > max_words:
+            break
+
+    if total_words > max_words:
+        raise SystemExit(f"Performance budget: too many words ({total_words}) > max_words ({max_words}).")
+
+
 def _apply_site_root_early():
     """Allow running core scripts from inside thin-repo.
 
@@ -389,6 +457,7 @@ def main() -> int:
     cfg = load_yaml(SITE_CONFIG_PATH)
 
     pages = sorted(CONTENT_ROOT.glob("*/index.md"))
+    performance_budget(site_cfg, pages)
     if not pages:
         print("No pages found to validate.")
         return 0

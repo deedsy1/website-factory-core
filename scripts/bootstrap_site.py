@@ -307,6 +307,8 @@ def main():
     site_cfg.setdefault("internal_linking", {})
     site_cfg.setdefault("ads", {})
     site_cfg.setdefault("gates", {})
+    site_cfg["gates"].setdefault("max_pages", int(os.getenv("PERF_MAX_PAGES", "1000")))
+    site_cfg["gates"].setdefault("max_words", int(os.getenv("PERF_MAX_WORDS", "600000")))
 
     site_cfg["site"].update({
         "title": site_title,

@@ -569,6 +569,14 @@ def main():
     cfg = load_yaml(site_cfg_path)
     system, page_prompt = build_prompts(cfg)
 
+
+    # Performance budgets: stop generating if we've hit the cap.
+    max_pages = int(os.getenv("PERF_MAX_PAGES", str(cfg.get("gates", {}).get("max_pages", 1000))))
+    existing_pages = len(list(CONTENT_ROOT.glob("*/index.md")))
+    if existing_pages >= max_pages:
+        print(f"✅ Page cap reached ({existing_pages}/{max_pages}). Nothing to do.")
+        return
+
     # Provide internal link candidates so the model can reliably include them
     link_hints = build_internal_link_hints(CONTENT_ROOT, limit=40)
     if link_hints:
