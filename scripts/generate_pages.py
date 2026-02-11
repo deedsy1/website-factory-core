@@ -80,6 +80,13 @@ BASE_URL = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1").rstrip("
 API_KEY = os.environ["MOONSHOT_API_KEY"]
 MODEL = os.getenv("KIMI_MODEL", "kimi-k2.5")
 
+# Reliability knobs (env)
+# Keep these shared across bootstrap/factory so a single tuning works everywhere.
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "180"))
+HTTP_MAX_TRIES = int(os.getenv("KIMI_HTTP_MAX_TRIES", "6"))
+BACKOFF_BASE = float(os.getenv("KIMI_BACKOFF_BASE", "1.7"))
+FAIL_STOP = int(os.getenv("FAIL_STOP", "6"))  # stop after N consecutive title failures
+
 PAGES_PER_RUN = int(os.getenv("PAGES_PER_RUN", "10"))
 MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", "25"))
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1600"))
@@ -196,18 +203,26 @@ def call_kimi(system: str, prompt: str):
     }
 
     last_err = None
-    for attempt in range(5):
-        r = requests.post(
-            f"{BASE_URL}/chat/completions",
-            headers=HEADERS,
-            json=payload,
-            timeout=60,
-        )
+    for attempt in range(HTTP_MAX_TRIES):
+        try:
+            r = requests.post(
+                f"{BASE_URL}/chat/completions",
+                headers=HEADERS,
+                json=payload,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as e:
+            last_err = str(e)
+            # treat network errors like retryable failures
+            sleep_s = min(60.0, (BACKOFF_BASE ** attempt)) + random.uniform(0, 0.25)
+            time.sleep(sleep_s)
+            continue
         if r.status_code < 400:
             return r.json()["choices"][0]["message"]["content"]
 
-        if r.status_code in (429, 500, 502, 503):
-            time.sleep(min(60, (2 ** attempt)) + random.uniform(0, 0.25))
+        if r.status_code in (408, 429, 500, 502, 503, 504):
+            sleep_s = min(60.0, (BACKOFF_BASE ** attempt)) + random.uniform(0, 0.25)
+            time.sleep(sleep_s)
             continue
 
         last_err = r.text
@@ -656,6 +671,7 @@ def main():
     attempts = 0
     retries = 0
     deletes = 0
+    consec_fail = 0
 
     manifest["generated_this_run"] = []
     used = set(manifest.get("used_titles", []))
@@ -701,7 +717,11 @@ def main():
         )
         if not ok:
             deletes += 1
+            consec_fail += 1
             per_title_fail[slug] = per_title_fail.get(slug, 0) + 1
+            if consec_fail >= FAIL_STOP:
+                print(f"\nStop early: hit {consec_fail} consecutive failures (FAIL_STOP={FAIL_STOP}).")
+                break
             continue
 
         close = choose_close(data, cfg)
@@ -714,6 +734,7 @@ def main():
             plan_item["generated_date"] = date.today().isoformat()
 
         produced += 1
+        consec_fail = 0
         used.add(slug)
         manifest.setdefault("used_titles", []).append(slug)
         manifest.setdefault("generated_this_run", []).append(slug)
