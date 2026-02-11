@@ -160,23 +160,40 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
     }
 
     last_err = None
-    for attempt in range(HTTP_MAX_TRIES):    try:
-        r = requests.post(f"{BASE_URL}/chat/completions", headers=HEADERS, json=payload, timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT))
-    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-        if attempt == HTTP_MAX_TRIES - 1:
-            raise
-        sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
-        print(f"HTTP error: {type(e).__name__} — retrying in {sleep:.1f}s")
-        time.sleep(sleep)
-        continue
+    for attempt in range(HTTP_MAX_TRIES):
+        try:
+            r = requests.post(
+                f"{BASE_URL}/chat/completions",
+                headers=HEADERS,
+                json=payload,
+                timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
+            )
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_err = f"{type(e).__name__}: {e}"
+            if attempt == HTTP_MAX_TRIES - 1:
+                raise
+            sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
+            print(f"HTTP error: {type(e).__name__} — retrying in {sleep:.1f}s")
+            time.sleep(sleep)
+            continue
+
+        # Success
         if r.status_code < 400:
             content = r.json()["choices"][0]["message"]["content"]
             return parse_json_strict_or_extract(content)
 
-        if r.status_code in (429, 500, 502, 503):
-            time.sleep(2 ** attempt)
+        # Retryable server/rate-limit errors
+        if r.status_code in (408, 429, 500, 502, 503, 504):
+            last_err = f"HTTP {r.status_code}: {r.text[:4000]}"
+            if attempt == HTTP_MAX_TRIES - 1:
+                break
+            sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
+            print(f"HTTP {r.status_code} — retrying in {sleep:.1f}s")
+            time.sleep(sleep)
             continue
-        last_err = r.text
+
+        # Non-retryable
+        last_err = f"HTTP {r.status_code}: {r.text[:4000]}"
         break
 
     raise RuntimeError(last_err or "Moonshot API retries exhausted")
@@ -307,8 +324,6 @@ def main():
     site_cfg.setdefault("internal_linking", {})
     site_cfg.setdefault("ads", {})
     site_cfg.setdefault("gates", {})
-    site_cfg["gates"].setdefault("max_pages", int(os.getenv("PERF_MAX_PAGES", "1000")))
-    site_cfg["gates"].setdefault("max_words", int(os.getenv("PERF_MAX_WORDS", "600000")))
 
     site_cfg["site"].update({
         "title": site_title,
