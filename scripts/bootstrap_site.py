@@ -76,6 +76,10 @@ HEADERS = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/js
 # Network + retry knobs (override via workflow env vars)
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "180"))
 CONNECT_TIMEOUT = int(os.getenv("CONNECT_TIMEOUT", "20"))
+
+# Max tokens we allow Kimi/Moonshot to return for bootstrap artifacts.
+# (Workflows set this via env; default keeps responses reasonably small.)
+MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1600"))
 HTTP_MAX_TRIES = int(os.getenv("KIMI_HTTP_MAX_TRIES", "6"))
 BACKOFF_BASE = float(os.getenv("KIMI_BACKOFF_BASE", "1.7"))
 
