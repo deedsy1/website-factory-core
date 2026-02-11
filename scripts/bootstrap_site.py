@@ -238,8 +238,11 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
                     + "\n\nCRITICAL: Output MUST be a single valid JSON object. "
                       "No markdown. No code fences. No commentary."
                 )
-                payload["temperature"] = min(payload.get("temperature", 1.0), 0.2)
-
+                # Some Moonshot/Kimi models only accept temperature=1.
+                if "kimi" in (MODEL or "").lower():
+                    payload["temperature"] = 1
+                else:
+                    payload["temperature"] = min(payload.get("temperature", 1.0), 0.2)
                 if attempt == HTTP_MAX_TRIES - 1:
                     raise
                 sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
@@ -255,6 +258,13 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
             sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
             print(f"HTTP {r.status_code} — retrying in {sleep:.1f}s")
             time.sleep(sleep)
+            continue
+
+        # Some models only accept temperature=1; if we accidentally sent another value, fix and retry.
+        if r.status_code == 400 and 'invalid temperature' in (r.text or '').lower():
+            payload['temperature'] = 1
+            last_err = f"HTTP 400 (temperature): {r.text}"
+            time.sleep(0.5)
             continue
 
         # Non-retryable
