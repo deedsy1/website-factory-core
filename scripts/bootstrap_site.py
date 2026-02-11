@@ -92,9 +92,6 @@ except Exception:
 # Hard safety clamp: if a model rejects non-1 values, keep the workflow moving.
 if TEMPERATURE != 1:
     TEMPERATURE = 1
-
-if TEMPERATURE != 1:
-    TEMPERATURE = 1
 HTTP_MAX_TRIES = int(os.getenv("KIMI_HTTP_MAX_TRIES", "6"))
 BACKOFF_BASE = float(os.getenv("KIMI_BACKOFF_BASE", "1.7"))
 
@@ -150,29 +147,150 @@ def save_yaml(path: Path, data: dict):
     path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
 def parse_json_strict_or_extract(raw: str) -> dict:
-    raw = (raw or "").strip()
+    """Parse a JSON object from model output.
+
+    Accepts:
+      - A raw JSON object string
+      - JSON wrapped in code fences
+      - Prose + embedded JSON object
+      - Tool/function-call argument payloads (string or dict)
+
+    Raises json.JSONDecodeError on failure so callers can retry safely.
+    """
+    if raw is None:
+        raw = ""
+
+    # Some providers return dict/objects for tool-call arguments.
+    if isinstance(raw, (dict, list)):
+        try:
+            return raw if isinstance(raw, dict) else (raw[0] if raw and isinstance(raw[0], dict) else json.loads(json.dumps(raw)))
+        except Exception:
+            raw = json.dumps(raw)
+
+    raw = str(raw)
+
+    # Normalize weird whitespace / nulls.
+    raw = raw.replace("\ufeff", "").replace("\x00", "").strip()
 
     # Provider hiccups can occasionally yield an empty string. Treat this as
     # a parse failure so the caller can retry the request.
     if not raw:
         raise json.JSONDecodeError("Empty model output (expected JSON object)", raw, 0)
 
+    def _strip_code_fences(s: str) -> str:
+        s2 = re.sub(r"^```(?:json)?\s*", "", s.strip(), flags=re.I)
+        s2 = re.sub(r"\s*```\s*$", "", s2.strip())
+        return s2.strip()
+
+    cand = _strip_code_fences(raw)
+
+    # 1) strict parse
     try:
-        return json.loads(raw)
+        obj = json.loads(cand)
+        if isinstance(obj, list) and len(obj) == 1 and isinstance(obj[0], dict):
+            return obj[0]
+        if not isinstance(obj, dict):
+            raise json.JSONDecodeError("Top-level JSON must be an object", cand, 0)
+        return obj
     except json.JSONDecodeError:
         pass
 
-    raw2 = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
-    raw2 = re.sub(r"\s*```$", "", raw2)
-    try:
-        return json.loads(raw2)
-    except json.JSONDecodeError:
-        pass
+    # 2) Extract the first balanced JSON object from the text.
+    # This is safer than a greedy regex when braces appear in prose.
+    s = cand
+    start = s.find("{")
+    if start == -1:
+        raise json.JSONDecodeError("No JSON object found in model output", cand, 0)
 
-    m = re.search(r"\{.*\}", raw, re.S)
-    if not m:
-        raise json.JSONDecodeError("No JSON object found in model output", raw, 0)
-    return json.loads(m.group(0))
+    depth = 0
+    in_str = False
+    esc = False
+    end = None
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        else:
+            if ch == '"':
+                in_str = True
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+
+    if end is None:
+        raise json.JSONDecodeError("JSON object appears truncated (missing closing brace)", cand, 0)
+
+    snippet = s[start:end].strip()
+    snippet = _strip_code_fences(snippet)
+
+    try:
+        obj = json.loads(snippet)
+        if not isinstance(obj, dict):
+            raise json.JSONDecodeError("Top-level JSON must be an object", snippet, 0)
+        return obj
+    except json.JSONDecodeError as e:
+        # Last resort: try a smaller match if the extracted snippet still fails.
+        raise e
+
+
+from typing import Optional, Dict, Any
+
+
+def _safe_write_kimi_dump(kind: str, attempt: int, *, content: str = "", envelope: Optional[Dict[str, Any]] = None, http_status: Optional[int] = None, http_text: Optional[str] = None, payload: Optional[Dict[str, Any]] = None):
+    """Write a debug dump to help diagnose provider hiccups.
+
+    Never includes API keys. Keeps content size bounded.
+    """
+    try:
+        log_dir = Path("scripts") / "_logs" / "kimi"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        rid = hashlib.sha1(f"{ts}-{kind}-{attempt}-{random.random()}".encode("utf-8")).hexdigest()[:10]
+        p = log_dir / f"{ts}-{kind}-a{attempt+1}-{rid}.json"
+
+        def _trim(s: str, n: int) -> str:
+            s = "" if s is None else str(s)
+            s = s.replace("\x00", "")
+            return s[:n]
+
+        safe_payload = None
+        if isinstance(payload, dict):
+            # shallow copy and redact any auth-like fields
+            safe_payload = {}
+            for k, v in payload.items():
+                if k.lower() in ("api_key", "authorization"):
+                    safe_payload[k] = "[REDACTED]"
+                else:
+                    safe_payload[k] = v
+
+        dump = {
+            "kind": kind,
+            "attempt": attempt + 1,
+            "model": MODEL,
+            "temperature": (payload or {}).get("temperature"),
+            "max_tokens": (payload or {}).get("max_tokens"),
+            "http_status": http_status,
+            "content_preview": _trim(content, 4000),
+            "http_text_preview": _trim(http_text, 4000),
+            "payload": safe_payload,
+            "envelope": envelope,
+        }
+        p.write_text(json.dumps(dump, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        # Never let logging break the pipeline.
+        return
+
 
 def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int = 1400) -> dict:
     if not API_KEY:
@@ -216,20 +334,45 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
             try:
                 data = r.json()
                 msg = (data.get("choices", [{}])[0].get("message") or {})
-                content = (msg.get("content") or "")
+
+                content = msg.get("content")
+
+                # Newer/OpenAI-style envelopes may return content as a list of parts.
+                if isinstance(content, list):
+                    parts = []
+                    for part in content:
+                        if isinstance(part, dict):
+                            # Common shapes: {type:'text', text:'...'} or {text:'...'}
+                            if "text" in part and isinstance(part.get("text"), str):
+                                parts.append(part.get("text"))
+                            elif "content" in part and isinstance(part.get("content"), str):
+                                parts.append(part.get("content"))
+                        elif isinstance(part, str):
+                            parts.append(part)
+                    content = "".join(parts).strip()
+
+                if content is None:
+                    content = ""
 
                 # Some providers/models return tool/function calls with JSON in "arguments"
                 # instead of plain text in "content".
-                if not content:
+                if not str(content).strip():
                     tool_calls = msg.get("tool_calls") or []
                     if isinstance(tool_calls, list) and tool_calls:
                         fn = (tool_calls[0].get("function") or {})
                         content = fn.get("arguments") or ""
-                if not content:
+
+                if not str(content).strip():
                     fn_call = (msg.get("function_call") or {})
                     content = fn_call.get("arguments") or ""
 
+                # Some providers put the raw JSON under a different key (rare).
+                if not str(content).strip() and isinstance(msg.get("json"), (dict, str)):
+                    content = msg.get("json")
+
+                content = content if content is not None else ""
                 content = str(content)
+
             except Exception as e:
                 last_err = f"Bad JSON response envelope: {type(e).__name__}: {e}"
                 if attempt == HTTP_MAX_TRIES - 1:
@@ -246,6 +389,7 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
                 last_err = f"Model JSON decode error: {e}"
                 preview = (content or "").strip().replace("\n", " ")[:240]
                 print(f"Model returned non-JSON content (attempt {attempt+1}/{HTTP_MAX_TRIES}): {preview}")
+                _safe_write_kimi_dump("json_decode", attempt, content=content, envelope=data, http_status=r.status_code, http_text=r.text, payload=payload)
 
                 # Strengthen system instruction once; keep idempotent.
                 payload["messages"][0]["content"] = (
