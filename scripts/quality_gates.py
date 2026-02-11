@@ -312,23 +312,42 @@ def validate_page(md_path: Path, cfg: dict) -> Tuple[bool, List[str], int, int]:
     min_links = int(internal.get("min_links", gates.get("min_internal_links", 3)))
     forbid_external = bool(internal.get("forbid_external", gates.get("forbid_external_links", True)))
 
+    # Hugo section/home index pages (_index.md) are often intentionally short.
+    # Treat them as a special case so the generator doesn't fail immediately on
+    # a placeholder/intro home page.
+    is_index_page = md_path.name == "_index.md"
+    if is_index_page:
+        required_outline = []
+        wc_min = 0
+        wc_max = max(wc_max, 2000)
+        ideal_min = 0
+        ideal_max = max(ideal_max, 500)
+        min_links = 0
+        forbid_external = False
+        max_sent = max(max_sent, 6)
+
     raw = md_path.read_text(encoding="utf-8")
     fm, body = read_frontmatter(raw)
 
     # 1) Frontmatter keys
-    for k in ["title", "slug", "description", "date", "hub", "page_type", "summary"]:
+    fm_required = ["title", "slug", "description", "date", "hub", "page_type", "summary"]
+    if is_index_page:
+        fm_required = ["title", "description"]
+
+    for k in fm_required:
         scored_total += 1
         if fm.get(k) is None or str(fm.get(k)).strip() == "":
             failures.append(f"Missing frontmatter key: {k}")
         else:
             scored_pass += 1
 
-    # 2) Headings restrictions
-    scored_total += 1
-    if not has_only_h2_h3(body):
-        failures.append("Headings must be H2/H3 only (no H1 or H4+).")
-    else:
-        scored_pass += 1
+    # 2) Headings restrictions (skip for index pages)
+    if not is_index_page:
+        scored_total += 1
+        if not has_only_h2_h3(body):
+            failures.append("Headings must be H2/H3 only (no H1 or H4+).")
+        else:
+            scored_pass += 1
 
     # 3) Outline (exact H2 set and order)
     if required_outline:

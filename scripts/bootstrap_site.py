@@ -80,6 +80,21 @@ CONNECT_TIMEOUT = int(os.getenv("CONNECT_TIMEOUT", "20"))
 # Max tokens we allow Kimi/Moonshot to return for bootstrap artifacts.
 # (Workflows set this via env; default keeps responses reasonably small.)
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1600"))
+
+# Some Moonshot/Kimi models only accept temperature=1 (integer).
+# We still read TEMPERATURE for compatibility, but clamp to a safe value.
+try:
+    _t_raw = os.getenv("TEMPERATURE", "1").strip()
+    TEMPERATURE = int(float(_t_raw))
+except Exception:
+    TEMPERATURE = 1
+
+# Hard safety clamp: if a model rejects non-1 values, keep the workflow moving.
+if TEMPERATURE != 1:
+    TEMPERATURE = 1
+
+if TEMPERATURE != 1:
+    TEMPERATURE = 1
 HTTP_MAX_TRIES = int(os.getenv("KIMI_HTTP_MAX_TRIES", "6"))
 BACKOFF_BASE = float(os.getenv("KIMI_BACKOFF_BASE", "1.7"))
 
@@ -360,7 +375,12 @@ def main(site_slug: str = "", force_reset: bool = False):
         ],
     }
 
-    out = kimi_json(system=system, user=json.dumps(user, ensure_ascii=False), temperature=1.0, max_tokens=MAX_OUTPUT_TOKENS)
+        out = kimi_json(
+            system=system,
+            user=json.dumps(user, ensure_ascii=False),
+            temperature=TEMPERATURE,
+            max_tokens=MAX_OUTPUT_TOKENS,
+        )
 
     theme_pack = out.get("theme_pack")
     if theme_pack not in THEME_PACKS:
