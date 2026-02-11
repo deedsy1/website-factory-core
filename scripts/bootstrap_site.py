@@ -379,12 +379,12 @@ def main(site_slug: str = "", force_reset: bool = False):
         ],
     }
 
-        out = kimi_json(
-            system=system,
-            user=json.dumps(user, ensure_ascii=False),
-            temperature=TEMPERATURE,
-            max_tokens=MAX_OUTPUT_TOKENS,
-        )
+    out = kimi_json(
+        system=system,
+        user=json.dumps(user, ensure_ascii=False),
+        temperature=TEMPERATURE,
+        max_tokens=MAX_OUTPUT_TOKENS,
+    )
 
     theme_pack = out.get("theme_pack")
     if theme_pack not in THEME_PACKS:
