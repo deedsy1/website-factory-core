@@ -192,9 +192,13 @@ def parse_json_strict_or_extract(raw: str) -> dict:
     return json.loads(m.group(0))
 
 def call_kimi(system: str, prompt: str):
+    temp = TEMPERATURE
+    if "kimi" in (MODEL or "").lower():
+        temp = 1
+
     payload = {
         "model": MODEL,
-        "temperature": TEMPERATURE,
+        "temperature": temp,
         "max_tokens": MAX_OUTPUT_TOKENS,
         "response_format": {"type": "json_object"},
         "messages": [
@@ -513,9 +517,50 @@ def generate_one_page(title: str, system: str, page_prompt: str, cfg: dict, pinn
     data["body_md"] = body
     return True, data
 
-def write_page(slug: str, data: dict, close: str, contract_hash: str, prompt_hash: str) -> None:
-    page_dir = os.path.join(CONTENT_ROOT, slug)
-    os.makedirs(page_dir, exist_ok=True)
+def write_page(slug: str, data: dict, close: str, contract_hash: str, prompt_hash: str) -> Path:
+    """Create a content page folder and write index.md.
+
+    The factory expects content/pages/<slug>/index.md with required frontmatter.
+    """
+    page_slug = (slug or "").strip()
+    if not page_slug:
+        raise ValueError("write_page: empty slug")
+
+    page_dir = Path("content") / "pages" / page_slug
+    page_dir.mkdir(parents=True, exist_ok=True)
+
+    title = (data.get("title") or page_slug.replace("-", " ").title()).strip()
+    hub = (data.get("hub") or "").strip()
+    page_type = (data.get("page_type") or data.get("type") or "guide").strip()
+    description = (data.get("description") or data.get("summary") or "").strip()
+    summary = (data.get("summary") or "").strip()
+
+    front = {
+        "title": title,
+        "slug": page_slug,
+        "description": description,
+        "summary": summary,
+        "hub": hub,
+        "page_type": page_type,
+        "date": data.get("date") or datetime.date.today().isoformat(),
+        "draft": False,
+        "ai": {
+            "contract_hash": contract_hash,
+            "prompt_hash": prompt_hash,
+        },
+    }
+
+    body = (data.get("body_md") or "").rstrip()
+    close_txt = (close or "").strip()
+    if close_txt:
+        if body:
+            body += "\n\n"
+        body += close_txt + "\n"
+
+    md = write_markdown_with_frontmatter(front, body)
+    (page_dir / "index.md").write_text(md, encoding="utf-8")
+    return page_dir
+
 
 def _remove_one(path: Path, title: str) -> None:
     if not path.exists():
@@ -547,38 +592,29 @@ def mark_failed(title: str, reason: str) -> None:
 
 
 def mark_done(title: str) -> None:
-    # remove from both retry + pool
-    _remove_one(RETRY_TITLES_PATH, title)
-    _remove_one(TITLES_POOL_PATH, title)
+    """Mark a title as completed across all inputs (plan + pools).
 
-    def esc(s: str) -> str:
-        return str(s).replace('"', r'\\"').strip()
+    This is intentionally conservative: it only removes exact matches.
+    """
+    t = (title or "").strip()
+    if not t:
+        return
 
-    body = (data.get("body_md") or "").strip()
+    # remove from titles pools (if present)
+    _remove_one(Path("scripts") / "titles_pool.txt", t)
+    _remove_one(Path("scripts") / "retry_titles.txt", t)
 
-    md = f"""---
-title: "{esc(data['title'])}"
-slug: "{slug}"
-summary: "{esc(data['summary'])}"
-description: "{esc(data['description'])}"
-date: "{date.today().isoformat()}"
-hub: "{esc(data['hub'])}"
-page_type: "{esc(data['page_type'])}"
-gen_version: "{GEN_VERSION}"
-contract_hash: "{contract_hash}"
-prompt_hash: "{prompt_hash}"
----
+    # remove from plan queue (if present)
+    try:
+        plan = load_plan()
+        q = plan.get("queue") or []
+        if isinstance(q, list) and t in q:
+            plan["queue"] = [x for x in q if x != t]
+            save_plan(plan)
+    except Exception:
+        # don't break generation because of bookkeeping
+        pass
 
-**{esc(data['summary'])}**
-
-{body}
-
----
-
-*{esc(close)}*
-"""
-    with open(os.path.join(page_dir, "index.md"), "w", encoding="utf-8") as f:
-        f.write(md)
 
 def main():
     site_cfg_path = resolve_site_config_path()

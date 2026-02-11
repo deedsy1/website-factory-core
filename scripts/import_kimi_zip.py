@@ -10,23 +10,30 @@ def slugify(s: str) -> str:
     s = re.sub(r"-+", "-", s)
     return s[:90].strip("-")
 
-def ensure_frontmatter(md: str, fallback_title: str):
-    if md.lstrip().startswith("---"):
-        # ensure required keys exist
-        head, rest = md.split("---", 2)[1], md.split("---", 2)[2]
-        fm = head
-        def has(k): return re.search(rf"^\s*{re.escape(k)}\s*:", fm, flags=re.M) is not None
-        add=[]
-        if not has("slug"): add.append(f"slug: \"{slugify(fallback_title)}\"")
-        if not has("date"): add.append(f"date: {date.today().isoformat()}")
-        if not has("hub"): add.append("hub: work-career")
-        if not has("page_type"): add.append("page_type: explainer")
-        if add:
-            fm = fm.rstrip()+"\n" + "\n".join(add) + "\n"
-        return "---\n"+fm+"---\n"+rest.lstrip("\n")
-    else:
-        slug = slugify(fallback_title)
-        return f"""---\ntitle: \"{fallback_title}\"\nslug: \"{slug}\"\ndescription: \"\"\ndate: {date.today().isoformat()}\nhub: work-career\npage_type: explainer\n---\n\n{md.strip()}\n"""
+def ensure_frontmatter(md: str, fallback_title: str) -> str:
+    """Ensure markdown has valid YAML frontmatter.
+
+    If the file starts with '---' but is missing a closing delimiter, treat it as malformed and
+    replace with a fresh frontmatter block (preserving the body as best we can).
+    """
+    text = (md or "").lstrip("\ufeff")  # strip BOM if present
+    if text.strip().startswith("---"):
+        parts = text.split("---", 2)
+        # Expected: ['', '\n<yaml>\n', '<body>...']
+        if len(parts) >= 3:
+            fm = parts[1].strip()
+            body = parts[2].lstrip("\n")
+            if "title:" not in fm:
+                fm = f"title: {yaml_quote(fallback_title)}\n" + fm
+            return "---\n" + fm.rstrip() + "\n---\n\n" + body
+        # malformed frontmatter (no closing ---); fall through and rebuild
+        text = text.lstrip("-").lstrip()
+
+    # no frontmatter (or malformed) -> create it
+    fm = f"title: {yaml_quote(fallback_title)}\n"
+    body = text.lstrip()
+    return "---\n" + fm + "---\n\n" + body + ("\n" if not body.endswith("\n") else "")
+
 
 def main(zip_path: str):
     os.makedirs(OUTPUT_ROOT, exist_ok=True)

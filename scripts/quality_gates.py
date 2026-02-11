@@ -476,7 +476,7 @@ def main() -> int:
     cfg = load_yaml(SITE_CONFIG_PATH)
 
     pages = sorted(CONTENT_ROOT.glob("*/index.md"))
-    performance_budget(site_cfg, pages)
+    performance_budget(cfg, pages)
     if not pages:
         print("No pages found to validate.")
         return 0
@@ -497,13 +497,11 @@ def main() -> int:
                 print(f"[FAIL] {slug}: {f}")
             if DELETE_ON_FAIL:
                 try:
-                    # delete entire page folder
-                    for p in md.parent.glob("**/*"):
-                        p.unlink(missing_ok=True)
-                    md.parent.rmdir()
+                    import shutil
+                    shutil.rmtree(md.parent)
                     print(f"[DEL]  {slug}: removed page folder")
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[WARN] {slug}: failed to remove page folder: {e}")
 
     compliance = 0.0 if total_scored == 0 else (total_passed / total_scored) * 100.0
     print(f"\nCompliance score: {compliance:.1f}% ({total_passed}/{total_scored} checks passed)")

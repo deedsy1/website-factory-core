@@ -178,9 +178,13 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
     if not API_KEY:
         raise RuntimeError("MOONSHOT_API_KEY is not set")
 
+    temp = temperature
+    if "kimi" in (MODEL or "").lower():
+        temp = 1
+
     payload = {
         "model": MODEL,
-        "temperature": temperature,
+        "temperature": temp,
         "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
         "messages": [
