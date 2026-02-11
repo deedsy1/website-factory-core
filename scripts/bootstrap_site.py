@@ -1,4 +1,5 @@
 import os
+import sys
 import argparse
 import re
 import json
@@ -8,6 +9,22 @@ from pathlib import Path
 
 import requests
 import yaml
+
+# --- site-root support (early) --------------------------------------------
+# Some paths are defined at import time, so we apply --site-root before that.
+def _apply_site_root_early():
+    if "--site-root" in sys.argv:
+        i = sys.argv.index("--site-root")
+        if i + 1 < len(sys.argv):
+            os.chdir(sys.argv[i + 1])
+
+_apply_site_root_early()
+
+def _sr(rel: str) -> Path:
+    """Resolve a path relative to the current working directory."""
+    return (Path.cwd() / rel).resolve()
+
+# ---------------------------------------------------------------------------
 
 BASE_URL = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1").rstrip("/")
 API_KEY = os.environ.get("MOONSHOT_API_KEY", "")
