@@ -1,10 +1,51 @@
 import os
+import sys
 import argparse
 import re
-import sys
 import yaml
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+
+def _slugify(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s or "site"
+
+
+def _apply_site_root_early():
+    """Allow running core scripts from inside thin-repo.
+
+    Priority:
+      1) --site-root <path>
+      2) --site-slug <slug>  -> chdir sites/<slug>
+      3) env SITE_SLUG (if set) -> chdir sites/<SITE_SLUG>
+      4) env BOOTSTRAP_NICHE / NICHE (slugified) -> chdir sites/<slug>
+    """
+    if "--site-root" in sys.argv:
+        i = sys.argv.index("--site-root")
+        if i + 1 < len(sys.argv) and sys.argv[i + 1]:
+            os.chdir(sys.argv[i + 1])
+        return
+
+    slug = None
+    if "--site-slug" in sys.argv:
+        i = sys.argv.index("--site-slug")
+        if i + 1 < len(sys.argv):
+            slug = (sys.argv[i + 1] or "").strip()
+
+    slug = slug or os.getenv("SITE_SLUG", "").strip()
+    if not slug:
+        slug = _slugify(os.getenv("BOOTSTRAP_NICHE") or os.getenv("NICHE") or "")
+
+    if slug:
+        target = Path("sites") / slug
+        target.mkdir(parents=True, exist_ok=True)
+        os.chdir(target)
+
+
+_apply_site_root_early()
 
 SITE_CONFIG_PATH = os.getenv("SITE_CONFIG_PATH", "data/site.yaml")
 CONTENT_ROOT = Path(os.getenv("CONTENT_ROOT", "content/pages"))

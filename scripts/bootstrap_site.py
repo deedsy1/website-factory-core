@@ -13,10 +13,50 @@ import yaml
 # --- site-root support (early) --------------------------------------------
 # Some paths are defined at import time, so we apply --site-root before that.
 def _apply_site_root_early():
+    """Allow running core scripts from inside thin-repo.
+
+    Priority:
+      1) --site-root <path>
+      2) --site-slug <slug>  -> chdir sites/<slug>
+      3) SITE_SLUG env       -> chdir sites/<slug>
+      4) slugify(BOOTSTRAP_NICHE or NICHE env) -> chdir sites/<slug>
+
+    If a slug is chosen, sites/<slug> is created if missing.
+    """
+
+    def _slugify(s: str) -> str:
+        s = (s or "").strip().lower()
+        s = re.sub(r"[^a-z0-9]+", "-", s)
+        s = re.sub(r"-+", "-", s).strip("-")
+        return s
+
+    # 1) explicit --site-root
     if "--site-root" in sys.argv:
         i = sys.argv.index("--site-root")
-        if i + 1 < len(sys.argv):
+        if i + 1 < len(sys.argv) and sys.argv[i + 1]:
             os.chdir(sys.argv[i + 1])
+            return
+
+    # 2) explicit --site-slug
+    slug = ""
+    if "--site-slug" in sys.argv:
+        i = sys.argv.index("--site-slug")
+        if i + 1 < len(sys.argv):
+            slug = (sys.argv[i + 1] or "").strip()
+
+    # 3) env SITE_SLUG
+    if not slug:
+        slug = (os.getenv("SITE_SLUG") or "").strip()
+
+    # 4) derive from niche envs
+    if not slug:
+        slug = _slugify(os.getenv("BOOTSTRAP_NICHE") or os.getenv("NICHE") or "")
+
+    if slug:
+        root = Path("sites") / slug
+        root.mkdir(parents=True, exist_ok=True)
+        os.chdir(root)
+        return
 
 _apply_site_root_early()
 

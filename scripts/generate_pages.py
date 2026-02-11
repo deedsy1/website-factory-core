@@ -1,4 +1,5 @@
 import os
+import sys
 import argparse
 import json
 import time
@@ -13,10 +14,61 @@ import yaml
 START_TIME = time.time()
 
 
+def _slugify(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s or "site"
+
+
+def _apply_site_root_early():
+    """Allow running core scripts from inside thin-repo.
+
+    Priority:
+      1) --site-root <path>
+      2) --site-slug <slug>  -> chdir sites/<slug>
+      3) SITE_SLUG env (if set) -> chdir sites/<SITE_SLUG>
+
+    If slug is blank, we derive it from BOOTSTRAP_NICHE/NICHE.
+    """
+    # 1) explicit --site-root
+    if "--site-root" in sys.argv:
+        i = sys.argv.index("--site-root")
+        if i + 1 < len(sys.argv) and sys.argv[i + 1]:
+            os.chdir(sys.argv[i + 1])
+            return
+
+    # 2) --site-slug
+    slug = ""
+    if "--site-slug" in sys.argv:
+        i = sys.argv.index("--site-slug")
+        if i + 1 < len(sys.argv):
+            slug = (sys.argv[i + 1] or "").strip()
+
+    # 3) env
+    if not slug:
+        slug = (os.getenv("SITE_SLUG", "") or "").strip()
+
+    if not slug:
+        niche = (os.getenv("BOOTSTRAP_NICHE", "") or os.getenv("NICHE", "")).strip()
+        slug = _slugify(niche)
+
+    if slug:
+        root = Path("sites") / slug
+        root.mkdir(parents=True, exist_ok=True)
+        os.chdir(root)
+
+
+_apply_site_root_early()
+
+
 def _parse_site_root() -> Path:
-    p = argparse.ArgumentParser()
-    p.add_argument("--site-root", default=".", help="Path to the site repo root")
-    return p.parse_args().site_root
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--site-root", default=".")
+    p.add_argument("--site-slug", default="")
+    # We only care about site-root here; everything else is handled later.
+    args, _ = p.parse_known_args()
+    return Path(args.site_root).resolve()
 
 SITE_ROOT = Path(_parse_site_root()).resolve()
 
