@@ -137,6 +137,11 @@ def save_yaml(path: Path, data: dict):
 def parse_json_strict_or_extract(raw: str) -> dict:
     raw = (raw or "").strip()
 
+    # Provider hiccups can occasionally yield an empty string. Treat this as
+    # a parse failure so the caller can retry the request.
+    if not raw:
+        raise json.JSONDecodeError("Empty model output (expected JSON object)", raw, 0)
+
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -187,10 +192,41 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
             time.sleep(sleep)
             continue
 
-        # Success
+        # Success (HTTP), but we may still get non-JSON content on rare provider hiccups.
         if r.status_code < 400:
-            content = r.json()["choices"][0]["message"]["content"]
-            return parse_json_strict_or_extract(content)
+            try:
+                content = r.json()["choices"][0]["message"]["content"]
+            except Exception as e:
+                last_err = f"Bad JSON response envelope: {type(e).__name__}: {e}"
+                if attempt == HTTP_MAX_TRIES - 1:
+                    raise
+                sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
+                print(f"Response parse error — retrying in {sleep:.1f}s")
+                time.sleep(sleep)
+                continue
+
+            try:
+                return parse_json_strict_or_extract(content)
+            except json.JSONDecodeError as e:
+                # Tighten prompt + reduce temperature and retry.
+                last_err = f"Model JSON decode error: {e}"
+                preview = (content or "").strip().replace("\n", " ")[:240]
+                print(f"Model returned non-JSON content (attempt {attempt+1}/{HTTP_MAX_TRIES}): {preview}")
+
+                # Strengthen system instruction once; keep idempotent.
+                payload["messages"][0]["content"] = (
+                    system
+                    + "\n\nCRITICAL: Output MUST be a single valid JSON object. "
+                      "No markdown. No code fences. No commentary."
+                )
+                payload["temperature"] = min(payload.get("temperature", 1.0), 0.2)
+
+                if attempt == HTTP_MAX_TRIES - 1:
+                    raise
+                sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
+                print(f"Retrying after non-JSON output in {sleep:.1f}s")
+                time.sleep(sleep)
+                continue
 
         # Retryable server/rate-limit errors
         if r.status_code in (408, 429, 500, 502, 503, 504):
