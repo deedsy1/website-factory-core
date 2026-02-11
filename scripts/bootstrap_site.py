@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import os
 import sys
 import argparse
@@ -8,7 +9,7 @@ import time
 import hashlib
 import random
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional, Dict, Any
 
 import requests
 import yaml
@@ -94,9 +95,12 @@ except Exception:
 # Hard safety clamp: if a model rejects non-1 values, keep the workflow moving.
 if TEMPERATURE != 1:
     TEMPERATURE = 1
+
 HTTP_MAX_TRIES = int(os.getenv("KIMI_HTTP_MAX_TRIES", "6"))
 BACKOFF_BASE = float(os.getenv("KIMI_BACKOFF_BASE", "1.7"))
-EMPTY_BACKOFF_BASE = float(os.getenv("KIMI_EMPTY_BACKOFF_BASE", "1.2"))
+
+# Faster backoff for "empty content" failures (provider hiccup / strict-mode edge cases).
+EMPTY_BACKOFF_BASE = float(os.getenv("KIMI_EMPTY_BACKOFF_BASE", "1.25"))
 EMPTY_BACKOFF_CAP = float(os.getenv("KIMI_EMPTY_BACKOFF_CAP", "3.0"))
 
 SITE_PATH = Path(os.getenv("SITE_CONFIG", "data/site.yaml"))
@@ -136,7 +140,7 @@ DEFAULT_OUTLINE_H2 = [
 ]
 
 def slugify(s: str) -> str:
-    s = s.lower().strip()
+    s = (s or "").lower().strip()
     s = re.sub(r"[^a-z0-9\s-]", "", s)
     s = re.sub(r"\s+", "-", s)
     return s[:60].strip("-") or "site"
@@ -200,7 +204,6 @@ def parse_json_strict_or_extract(raw: str) -> dict:
         pass
 
     # 2) Extract the first balanced JSON object from the text.
-    # This is safer than a greedy regex when braces appear in prose.
     s = cand
     start = s.find("{")
     if start == -1:
@@ -238,20 +241,22 @@ def parse_json_strict_or_extract(raw: str) -> dict:
     snippet = s[start:end].strip()
     snippet = _strip_code_fences(snippet)
 
-    try:
-        obj = json.loads(snippet)
-        if not isinstance(obj, dict):
-            raise json.JSONDecodeError("Top-level JSON must be an object", snippet, 0)
-        return obj
-    except json.JSONDecodeError as e:
-        # Last resort: try a smaller match if the extracted snippet still fails.
-        raise e
+    obj = json.loads(snippet)
+    if not isinstance(obj, dict):
+        raise json.JSONDecodeError("Top-level JSON must be an object", snippet, 0)
+    return obj
 
 
-from typing import Optional, Dict, Any
-
-
-def _safe_write_kimi_dump(kind: str, attempt: int, *, content: str = "", envelope: Optional[Dict[str, Any]] = None, http_status: Optional[int] = None, http_text: Optional[str] = None, payload: Optional[Dict[str, Any]] = None):
+def _safe_write_kimi_dump(
+    kind: str,
+    attempt: int,
+    *,
+    content: str = "",
+    envelope: Optional[Dict[str, Any]] = None,
+    http_status: Optional[int] = None,
+    http_text: Optional[str] = None,
+    payload: Optional[Dict[str, Any]] = None,
+):
     """Write a debug dump to help diagnose provider hiccups.
 
     Never includes API keys. Keeps content size bounded.
@@ -270,7 +275,6 @@ def _safe_write_kimi_dump(kind: str, attempt: int, *, content: str = "", envelop
 
         safe_payload = None
         if isinstance(payload, dict):
-            # shallow copy and redact any auth-like fields
             safe_payload = {}
             for k, v in payload.items():
                 if k.lower() in ("api_key", "authorization"):
@@ -278,30 +282,10 @@ def _safe_write_kimi_dump(kind: str, attempt: int, *, content: str = "", envelop
                 else:
                     safe_payload[k] = v
 
-        # Pull a few useful fields from the response envelope (if present).
-        choices_len = None
-        finish_reason = None
-        usage = None
-        if isinstance(envelope, dict):
-            try:
-                choices = envelope.get("choices") or []
-                if isinstance(choices, list):
-                    choices_len = len(choices)
-                    if choices:
-                        finish_reason = (choices[0] or {}).get("finish_reason")
-                usage = envelope.get("usage")
-            except Exception:
-                pass
-
         dump = {
             "kind": kind,
             "attempt": attempt + 1,
             "model": MODEL,
-            "temperature": (payload or {}).get("temperature"),
-            "max_tokens": (payload or {}).get("max_tokens"),
-            "choices_len": choices_len,
-            "finish_reason": finish_reason,
-            "usage": usage,
             "http_status": http_status,
             "content_preview": _trim(content, 4000),
             "http_text_preview": _trim(http_text, 4000),
@@ -310,150 +294,95 @@ def _safe_write_kimi_dump(kind: str, attempt: int, *, content: str = "", envelop
         }
         p.write_text(json.dumps(dump, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception:
-        # Never let logging break the pipeline.
         return
 
 
-
-def fallback_bootstrap_contract(niche: str, tone: str, title_count: int) -> dict:
-    """Deterministic fallback when the LLM/provider returns empty output.
-
-    This is intentionally conservative and boring: it produces a valid contract
-    shape so bootstrap can proceed and be re-run later when the provider is healthy.
-    """
-    niche = (niche or "").strip()
-    tone = (tone or "neutral, calm, beginner-friendly").strip()
-
-    # Deterministic theme choice from niche hash
-    h = hashlib.sha256(niche.encode("utf-8")).hexdigest()
-    idx = int(h[:8], 16) % max(1, len(THEME_PACKS))
-    theme_pack = THEME_PACKS[idx] if THEME_PACKS else "modern-sans"
-
-    # Title/brand defaults (kept short and punctuation-free)
-    base_words = re.sub(r"[^a-zA-Z0-9\s-]", "", niche).strip().split()
-    short = " ".join(base_words[:3]).strip() or "Evergreen Site"
-    site_title = short.title()
-    brand = (base_words[0].title() if base_words else "Site")
-
-    tagline = "Calm, practical explanations for everyday questions."
-    meta = "Evergreen guides and neutral explainers. Not advice."
-
-    hubs = [
-        {"id": "basics", "label": "Basics"},
-        {"id": "gear-guides", "label": "Gear Guides"},
-        {"id": "setup-installation", "label": "Setup & Installation"},
-        {"id": "troubleshooting", "label": "Troubleshooting"},
-        {"id": "comparisons", "label": "Comparisons"},
-        {"id": "safety-best-practices", "label": "Safety & Best Practices"},
-    ]
-
-    # Generate evergreen, non-advice, non-time-sensitive title pool
-    # Keep it global-friendly and avoid brands/prices/stats.
-    topic = niche if niche else "this topic"
-
-    templates = [
-        "What is {t}?",
-        "Is it normal to struggle with {t}?",
-        "Why {t} feels confusing",
-        "Common misconceptions about {t}",
-        "Beginner mistakes with {t}",
-        "How {t} usually works",
-        "{t}: definitions and key terms",
-        "{t}: myths vs reality",
-        "{t}: what to check first",
-        "{t}: simple troubleshooting steps",
-        "{t}: safety and best practices",
-        "{t}: comparisons that matter",
-        "{t}: setup basics explained",
-        "{t}: how to choose a starting point",
-        "{t}: what experienced people wish beginners knew",
-        "{t}: a calm step-by-step overview",
-        "{t}: signs you're overcomplicating it",
-        "{t}: what usually causes problems",
-        "{t}: what to do when results vary",
-        "{t}: questions to ask before you change anything",
-    ]
-
-    # Deterministic shuffle so niches vary but remain reproducible
-    rnd = random.Random(int(h[8:16], 16))
-    rnd.shuffle(templates)
-
-    titles = []
-    seen = set()
-    for tpl in templates:
-        title = tpl.format(t=topic).strip()
-        key = slugify(title)
-        if key and key not in seen:
-            seen.add(key)
-            titles.append(title)
-
-    # Expand with gentle variations until we hit title_count
-    fillers = [
-        "Definitions to know for {t}",
-        "What people mean when they say {t}",
-        "How to tell if {t} is the issue",
-        "What usually changes {t}",
-        "Why {t} feels harder than it should",
-        "When {t} matters most",
-        "What to expect from {t}",
-        "How to keep {t} simple",
-        "How to compare options for {t}",
-        "A neutral checklist for {t}",
-    ]
-    i = 0
-    while len(titles) < max(10, int(title_count or 0)):
-        tpl = fillers[i % len(fillers)]
-        title = tpl.format(t=topic)
-        # add a small suffix for uniqueness if needed
-        if title in titles:
-            title = f"{title} (guide)"
-        key = slugify(title)
-        if key not in seen:
-            seen.add(key)
-            titles.append(title)
-        i += 1
-        if i > 2000:  # safety bound
-            break
-
-    return {
-        "site_title": site_title,
-        "brand": brand,
-        "tagline": tagline,
-        "default_meta_description": meta,
-        "theme_pack": theme_pack,
-        "hubs": hubs,
-        "titles_pool": titles[: max(10, int(title_count or 0))],
-    }
-
-
 def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int = 1400) -> dict:
+    """Call Moonshot chat/completions and return a parsed JSON object.
+
+    This function is hardened against:
+      - empty content responses
+      - tool_call-only responses
+      - code fences / prose wrapping
+      - provider envelope shape drift
+
+    For Kimi models, we DO NOT send response_format by default to avoid
+    strict-mode/schema edge cases that can yield empty content.
+    """
     if not API_KEY:
         raise RuntimeError("MOONSHOT_API_KEY is not set")
 
     is_kimi = "kimi" in (MODEL or "").lower()
 
-    temp = temperature
-    if is_kimi:
-        temp = 1
+    # Some Kimi models only accept temperature=1.
+    temp = 1 if is_kimi else float(temperature)
+
+    force_response_format = (os.getenv("KIMI_FORCE_RESPONSE_FORMAT") or "").strip() in ("1", "true", "yes", "on")
 
     payload: Dict[str, Any] = {
         "model": MODEL,
         "temperature": temp,
-        "max_tokens": max_tokens,
+        "max_tokens": int(max_tokens),
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
     }
 
-    # Kimi K2.5 has been observed to occasionally return empty content when
-    # strict/structured response modes are enabled. For factory stability we
-    # hard-disable response_format for Kimi models.
-    use_response_format = (os.getenv("KIMI_USE_RESPONSE_FORMAT", "1").strip().lower() not in ("0", "false", "no"))
-    if use_response_format and not is_kimi:
+    # Only include response_format when explicitly forced and NOT on Kimi.
+    if force_response_format and not is_kimi:
         payload["response_format"] = {"type": "json_object"}
 
-    last_err = None
+    def _as_text(v: Any) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            return v
+        if isinstance(v, (dict, list)):
+            try:
+                return json.dumps(v, ensure_ascii=False)
+            except Exception:
+                return str(v)
+        return str(v)
+
+    def _extract_content(data: Dict[str, Any]) -> str:
+        choices = data.get("choices") or []
+        if not choices:
+            return ""
+        msg = (choices[0] or {}).get("message") or {}
+        content = msg.get("content")
+
+        # OpenAI-style parts array
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    if isinstance(part.get("text"), str):
+                        parts.append(part["text"])
+                    elif isinstance(part.get("content"), str):
+                        parts.append(part["content"])
+                elif isinstance(part, str):
+                    parts.append(part)
+            content = "".join(parts)
+
+        # tool_calls / function_call arguments
+        if not _as_text(content).strip():
+            tool_calls = msg.get("tool_calls") or []
+            if isinstance(tool_calls, list) and tool_calls:
+                fn = (tool_calls[0].get("function") or {})
+                content = fn.get("arguments") or ""
+
+        if not _as_text(content).strip():
+            fn_call = (msg.get("function_call") or {})
+            content = fn_call.get("arguments") or ""
+
+        if not _as_text(content).strip() and isinstance(msg.get("json"), (dict, str)):
+            content = msg.get("json")
+
+        return _as_text(content).strip()
+
+    last_err: Optional[str] = None
+
     for attempt in range(HTTP_MAX_TRIES):
         try:
             r = requests.post(
@@ -471,97 +400,10 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
             time.sleep(sleep)
             continue
 
-        # Success (HTTP), but we may still get non-JSON content on rare provider hiccups.
-        if r.status_code < 400:
-            try:
-                data = r.json()
-                msg = (data.get("choices", [{}])[0].get("message") or {})
-
-                content = msg.get("content")
-
-                # Newer/OpenAI-style envelopes may return content as a list of parts.
-                if isinstance(content, list):
-                    parts = []
-                    for part in content:
-                        if isinstance(part, dict):
-                            # Common shapes: {type:'text', text:'...'} or {text:'...'}
-                            if "text" in part and isinstance(part.get("text"), str):
-                                parts.append(part.get("text"))
-                            elif "content" in part and isinstance(part.get("content"), str):
-                                parts.append(part.get("content"))
-                        elif isinstance(part, str):
-                            parts.append(part)
-                    content = "".join(parts).strip()
-
-                if content is None:
-                    content = ""
-
-                # Some providers/models return tool/function calls with JSON in "arguments"
-                # instead of plain text in "content".
-                if not str(content).strip():
-                    tool_calls = msg.get("tool_calls") or []
-                    if isinstance(tool_calls, list) and tool_calls:
-                        fn = (tool_calls[0].get("function") or {})
-                        content = fn.get("arguments") or ""
-
-                if not str(content).strip():
-                    fn_call = (msg.get("function_call") or {})
-                    content = fn_call.get("arguments") or ""
-
-                # Some providers put the raw JSON under a different key (rare).
-                if not str(content).strip() and isinstance(msg.get("json"), (dict, str)):
-                    content = msg.get("json")
-
-                content = content if content is not None else ""
-                content = str(content)
-
-            except Exception as e:
-                last_err = f"Bad JSON response envelope: {type(e).__name__}: {e}"
-                if attempt == HTTP_MAX_TRIES - 1:
-                    raise
-                sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
-                print(f"Response parse error — retrying in {sleep:.1f}s")
-                time.sleep(sleep)
-                continue
-
-            try:
-                return parse_json_strict_or_extract(content)
-            except json.JSONDecodeError as e:
-                # Tighten prompt + reduce temperature and retry.
-                last_err = f"Model JSON decode error: {e}"
-                preview = (content or "").strip().replace("
-", " ")[:240]
-                is_empty = (preview == "")
-                print(f"Model returned non-JSON content (attempt {attempt+1}/{HTTP_MAX_TRIES}): {preview}")
-                _safe_write_kimi_dump("json_decode", attempt, content=content, envelope=data, http_status=r.status_code, http_text=r.text, payload=payload)
-                if is_empty:
-                    _safe_write_kimi_dump("empty_content", attempt, content=content, envelope=data, http_status=r.status_code, http_text=r.text, payload=payload)
-
-                # Strengthen system instruction once; keep idempotent.
-                payload["messages"][0]["content"] = (
-                    system
-                    + "\n\nCRITICAL: Output MUST be a single valid JSON object. "
-                      "No markdown. No code fences. No commentary."
-                )
-                # Some Moonshot/Kimi models only accept temperature=1.
-                if "kimi" in (MODEL or "").lower():
-                    payload["temperature"] = 1
-                else:
-                    payload["temperature"] = min(payload.get("temperature", 1.0), 0.2)
-                if attempt == HTTP_MAX_TRIES - 1:
-                    raise
-                if is_empty:
-                    sleep = min(float(EMPTY_BACKOFF_CAP), (float(EMPTY_BACKOFF_BASE) ** attempt) + (random.random() * 0.2))
-                    print(f"Retrying after empty output in {sleep:.1f}s")
-                else:
-                    sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
-                    print(f"Retrying after non-JSON output in {sleep:.1f}s")
-                time.sleep(sleep)
-                continue
-
-        # Retryable server/rate-limit errors
+        # Retryable HTTP status
         if r.status_code in (408, 429, 500, 502, 503, 504):
             last_err = f"HTTP {r.status_code}: {r.text[:4000]}"
+            _safe_write_kimi_dump("http_retry", attempt, content="", envelope=None, http_status=r.status_code, http_text=r.text, payload=payload)
             if attempt == HTTP_MAX_TRIES - 1:
                 break
             sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
@@ -569,18 +411,65 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
             time.sleep(sleep)
             continue
 
-        # Some models only accept temperature=1; if we accidentally sent another value, fix and retry.
-        if r.status_code == 400 and 'invalid temperature' in (r.text or '').lower():
-            payload['temperature'] = 1
-            last_err = f"HTTP 400 (temperature): {r.text}"
-            time.sleep(0.5)
+        # Non-retryable HTTP errors
+        if r.status_code >= 400:
+            last_err = f"HTTP {r.status_code}: {r.text[:4000]}"
+            _safe_write_kimi_dump("http_error", attempt, http_status=r.status_code, http_text=r.text, payload=payload)
+            break
+
+        # Success HTTP; parse envelope
+        try:
+            data = r.json()
+        except Exception as e:
+            last_err = f"Bad JSON response envelope: {type(e).__name__}: {e}"
+            _safe_write_kimi_dump("bad_envelope", attempt, http_status=r.status_code, http_text=r.text, payload=payload)
+            if attempt == HTTP_MAX_TRIES - 1:
+                raise
+            sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
+            print(f"Response parse error — retrying in {sleep:.1f}s")
+            time.sleep(sleep)
             continue
 
-        # Non-retryable
-        last_err = f"HTTP {r.status_code}: {r.text[:4000]}"
-        break
+        content_text = _extract_content(data)
+
+        # Empty content is a known provider hiccup mode; treat as retryable with FAST backoff.
+        if not content_text:
+            last_err = "Empty model output"
+            _safe_write_kimi_dump("empty_content", attempt, content="", envelope=data, http_status=r.status_code, http_text=r.text, payload=payload)
+            if attempt == HTTP_MAX_TRIES - 1:
+                # Raise JSONDecodeError to reuse caller's existing handling
+                raise json.JSONDecodeError("Empty model output (expected JSON object)", "", 0)
+            sleep = min(EMPTY_BACKOFF_CAP, (EMPTY_BACKOFF_BASE ** attempt) + (random.random() * 0.25))
+            print(f"Model returned empty output (attempt {attempt+1}/{HTTP_MAX_TRIES}) — retrying in {sleep:.1f}s")
+            time.sleep(sleep)
+            continue
+
+        try:
+            return parse_json_strict_or_extract(content_text)
+        except json.JSONDecodeError as e:
+            last_err = f"Model JSON decode error: {e}"
+            preview = (content_text or "").strip().replace("\n", " ")[:240]
+            print(f"Model returned non-JSON content (attempt {attempt+1}/{HTTP_MAX_TRIES}): {preview}")
+            _safe_write_kimi_dump("json_decode", attempt, content=content_text, envelope=data, http_status=r.status_code, http_text=r.text, payload=payload)
+
+            # Strengthen system instruction once; keep idempotent.
+            payload["messages"][0]["content"] = (
+                system
+                + "\n\nCRITICAL: Output MUST be a single valid JSON object. "
+                  "No markdown. No code fences. No commentary."
+            )
+            # Keep temperature safe
+            payload["temperature"] = 1 if is_kimi else min(float(payload.get("temperature", 1.0)), 0.2)
+
+            if attempt == HTTP_MAX_TRIES - 1:
+                raise
+            sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
+            print(f"Retrying after non-JSON output in {sleep:.1f}s")
+            time.sleep(sleep)
+            continue
 
     raise RuntimeError(last_err or "Moonshot API retries exhausted")
+
 
 def ensure_manifest_reset():
     MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -621,23 +510,100 @@ def patch_hugo_yaml(site_cfg: dict):
     factory["brand"] = str(brand)
     params["factory"] = factory
 
-    # Ads defaults remain controlled via data/site.yaml + templates
     cfg["params"] = params
 
     HUGO_PATH.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
-def main(site_slug: str = "", force_reset: bool = False):
-    """Bootstrap a new site (or re-run safely).
+def _deterministic_bootstrap_fallback(niche: str, title_count: int) -> Dict[str, Any]:
+    """Deterministic fallback bootstrap content when the LLM is unavailable.
 
-    If `site_slug` is provided, we operate under sites/<site_slug>/... to keep
-    multiple sites isolated.
+    Produces a safe site identity + a titles pool sized up to title_count.
     """
+    n = (niche or "").strip()
+    words = [w for w in re.split(r"\s+", re.sub(r"[^a-zA-Z0-9\s]", " ", n)) if w]
+    title_words = words[:4] if words else ["Evergreen", "Guides"]
+    site_title = " ".join([w.capitalize() for w in title_words])[:40].strip() or "Evergreen Guides"
+    brand = site_title.split(" ")[0:3]
+    brand = " ".join([w.capitalize() for w in brand]).strip() or site_title
 
-    # Work within the site folder if a slug is provided (keeps runs isolated)
-    if site_slug:
-        site_root = Path("sites") / site_slug
-        site_root.mkdir(parents=True, exist_ok=True)
-        os.chdir(site_root)
+    # stable theme choice
+    seed = int(hashlib.sha1(n.encode("utf-8")).hexdigest()[:8], 16) if n else 0
+    theme_pack = THEME_PACKS[seed % len(THEME_PACKS)]
+
+    tagline = f"Practical explanations for {n.lower()} — neutral, simple, no hype." if n else "Practical explanations — neutral, simple, no hype."
+    meta = tagline[:155]
+
+    hubs = [
+        {"id": "basics", "label": "Basics"},
+        {"id": "how-it-works", "label": "How It Works"},
+        {"id": "gear-setup", "label": "Gear & Setup"},
+        {"id": "troubleshooting", "label": "Troubleshooting"},
+        {"id": "comparisons", "label": "Comparisons"},
+    ]
+
+    # Title generator templates (evergreen, question-style)
+    base = n.lower().strip() or "this topic"
+    templates = [
+        "What is {x}?",
+        "How does {x} work?",
+        "Beginner mistakes with {x}",
+        "Common misconceptions about {x}",
+        "{x}: key terms explained",
+        "How to choose {y} for {x}",
+        "{y} vs {z} for {x}",
+        "Signs you are overcomplicating {x}",
+        "A simple checklist for {x}",
+        "Troubleshooting {x}: common problems",
+        "What to do when {x} tastes bitter",
+        "What to do when {x} tastes sour",
+        "How to dial in {x} without chasing perfect",
+        "How grind size affects {x}",
+        "How water temperature affects {x}",
+        "How dose and yield affect {x}",
+        "How to keep {x} consistent day to day",
+        "How to clean and maintain {y} for {x}",
+        "How to set up a simple {x} routine",
+        "How to read feedback from taste in {x}",
+    ]
+    ys = ["a grinder", "a machine", "beans", "water", "a scale", "a workflow"]
+    zs = ["a manual grinder", "an electric grinder", "dark roast", "light roast", "tap water", "filtered water"]
+
+    titles = []
+    rnd = random.Random(seed)
+    while len(titles) < max(40, min(title_count, 600)):
+        t = rnd.choice(templates)
+        title = t.format(x=base, y=rnd.choice(ys), z=rnd.choice(zs))
+        titles.append(title)
+
+    # Ensure uniqueness and cap to title_count
+    uniq = []
+    seen = set()
+    for t in titles:
+        s = slugify(t)
+        if s in seen:
+            continue
+        seen.add(s)
+        uniq.append(t)
+        if len(uniq) >= title_count:
+            break
+
+    return {
+        "site_title": site_title,
+        "brand": brand,
+        "tagline": tagline[:120],
+        "default_meta_description": meta,
+        "theme_pack": theme_pack,
+        "hubs": hubs,
+        "titles_pool": uniq,
+    }
+
+def main(site_slug: str = "", force_reset: bool = False):
+    """Bootstrap a new site (or re-run safely)."""
+
+    # If this site is already bootstrapped, do nothing (idempotent + cheap)
+    if Path(SITE_PATH).exists() and Path(TITLES_POOL_PATH).exists() and not force_reset:
+        print(f"[bootstrap] Existing bootstrap detected for '{site_slug or Path.cwd().name}'. Skipping LLM calls.")
+        return
 
     # Ensure expected folders exist in the *current* site directory
     Path("scripts").mkdir(parents=True, exist_ok=True)
@@ -655,14 +621,8 @@ def main(site_slug: str = "", force_reset: bool = False):
             except Exception:
                 pass
 
-    # If this site is already bootstrapped, do nothing (idempotent + cheap)
-    if Path(SITE_PATH).exists() and Path(TITLES_POOL_PATH).exists() and not force_reset:
-        print(f"[bootstrap] Existing bootstrap detected for '{site_slug or Path.cwd().name}'. Skipping LLM calls.")
-        return
-
     existing = load_yaml(SITE_PATH)
 
-    # Bootstrap contract constants
     system = (
         "You are a careful site-bootstrapper for an evergreen informational website.\n"
         "Hard rules:\n"
@@ -707,12 +667,10 @@ def main(site_slug: str = "", force_reset: bool = False):
         )
     except Exception as e:
         print(f"[bootstrap] WARNING: LLM bootstrap failed ({type(e).__name__}: {e}). Using deterministic fallback.")
-        out = fallback_bootstrap_contract(NICHE, TONE, TITLE_COUNT)
-
+        out = _deterministic_bootstrap_fallback(NICHE, TITLE_COUNT)
 
     theme_pack = out.get("theme_pack")
     if theme_pack not in THEME_PACKS:
-        # deterministic fallback
         theme_pack = "modern-sans"
 
     site_title = (out.get("site_title") or "Evergreen Site").strip()
@@ -720,25 +678,19 @@ def main(site_slug: str = "", force_reset: bool = False):
     tagline = (out.get("tagline") or "Calm, practical explanations — not advice.").strip()
     meta = (out.get("default_meta_description") or tagline).strip()
 
-    # Keep existing base_url if user already deployed a site; otherwise leave placeholder
     base_url = (existing.get("site", {}) or {}).get("base_url") if isinstance(existing, dict) else None
     if not base_url:
-        # allow passing from workflow input (optional)
         base_url = (os.getenv("BOOTSTRAP_BASE_URL") or "https://YOUR-SITE.pages.dev/").strip()
 
     hubs = out.get("hubs") or (existing.get("taxonomy", {}) or {}).get("hubs") or [
-        {"id": "work-career", "label": "Work & Career"},
-        {"id": "money-stress", "label": "Money & Stress"},
-        {"id": "burnout-load", "label": "Burnout & Load"},
-        {"id": "milestones", "label": "Milestones"},
-        {"id": "social-norms", "label": "Social Norms"},
+        {"id": "basics", "label": "Basics"},
+        {"id": "how-it-works", "label": "How It Works"},
+        {"id": "gear-setup", "label": "Gear & Setup"},
+        {"id": "troubleshooting", "label": "Troubleshooting"},
+        {"id": "comparisons", "label": "Comparisons"},
     ]
 
-    # Apply the locked wordcount (quality strict, not padding strict)
-    wc_min = 900
-    wc_max = 1900
-    ideal_min = 1100
-    ideal_max = 1600
+    wc_min, wc_max, ideal_min, ideal_max = 900, 1900, 1100, 1600
 
     site_cfg = existing if isinstance(existing, dict) else {}
     site_cfg.setdefault("site", {})
@@ -761,7 +713,6 @@ def main(site_slug: str = "", force_reset: bool = False):
 
     site_cfg["theme"].update({
         "pack": theme_pack,
-        # keep existing fonts/spacing defaults unless changed elsewhere
         "font_sans": site_cfg["theme"].get("font_sans") or "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial, sans-serif",
         "font_serif": site_cfg["theme"].get("font_serif") or "ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif",
         "content_max": site_cfg["theme"].get("content_max") or "74ch",
@@ -772,24 +723,21 @@ def main(site_slug: str = "", force_reset: bool = False):
 
     gen = site_cfg["generation"]
     gen.setdefault("forbidden_words", [])
-    # keep existing forbidden words; ensure core set
     core_forbidden = [
         "diagnose", "diagnosis", "prescribed", "guaranteed", "sue",
         "treatment", "treat", "cure", "therapist", "lawyer", "accountant",
     ]
     merged = list(dict.fromkeys((gen.get("forbidden_words") or []) + core_forbidden))
     gen["forbidden_words"] = merged
-    gen["page_types"] = gen.get("page_types") or ["is-it-normal", "checklist", "red-flags", "myth-vs-reality", "explainer"]
+    gen["page_types"] = gen.get("page_types") or ["explainer", "checklist", "myth-vs-reality", "comparison", "troubleshooting"]
     gen["outline_h2"] = DEFAULT_OUTLINE_H2
     gen["wordcount"] = {"min": wc_min, "ideal_min": ideal_min, "ideal_max": ideal_max, "max": wc_max}
 
-    # Keep internal linking strict
     il = site_cfg["internal_linking"]
     il.setdefault("enabled", True)
     il["min_links"] = max(int(il.get("min_links") or 3), 3)
     il["forbid_external"] = True
 
-    # Gates mirror wordcount + strictness
     gates = site_cfg["gates"]
     gates["wordcount_min"] = wc_min
     gates["wordcount_max"] = wc_max
@@ -804,7 +752,6 @@ def main(site_slug: str = "", force_reset: bool = False):
 
     ensure_manifest_reset()
 
-    # Write a small bootstrap receipt for debugging/panel consumption later
     receipt = {
         "niche": NICHE,
         "tone": TONE,
@@ -813,6 +760,7 @@ def main(site_slug: str = "", force_reset: bool = False):
         "title_count_written": len(titles),
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "contract_hash": hashlib.sha256(("|".join(DEFAULT_OUTLINE_H2) + f"|{wc_min}-{wc_max}").encode("utf-8")).hexdigest()[:16],
+        "llm_used": bool(out and out.get("titles_pool")),
     }
     rc = Path("scripts/bootstrap_receipt.json")
     if not rc.exists():
@@ -829,10 +777,6 @@ def main(site_slug: str = "", force_reset: bool = False):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--site-slug", default="", help="Folder under sites/, e.g. home-espresso-basics")
-    ap.add_argument(
-        "--force-reset",
-        action="store_true",
-        help="Wipe existing site.yaml / titles pool / bootstrap receipt for this site before bootstrapping",
-    )
+    ap.add_argument("--force-reset", action="store_true", help="Wipe existing site.yaml / titles pool / bootstrap receipt before bootstrapping")
     args = ap.parse_args()
     main(site_slug=args.site_slug.strip(), force_reset=bool(args.force_reset))
