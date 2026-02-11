@@ -96,6 +96,8 @@ if TEMPERATURE != 1:
     TEMPERATURE = 1
 HTTP_MAX_TRIES = int(os.getenv("KIMI_HTTP_MAX_TRIES", "6"))
 BACKOFF_BASE = float(os.getenv("KIMI_BACKOFF_BASE", "1.7"))
+EMPTY_BACKOFF_BASE = float(os.getenv("KIMI_EMPTY_BACKOFF_BASE", "1.2"))
+EMPTY_BACKOFF_CAP = float(os.getenv("KIMI_EMPTY_BACKOFF_CAP", "3.0"))
 
 SITE_PATH = Path(os.getenv("SITE_CONFIG", "data/site.yaml"))
 HUGO_PATH = Path("hugo.yaml")
@@ -276,12 +278,30 @@ def _safe_write_kimi_dump(kind: str, attempt: int, *, content: str = "", envelop
                 else:
                     safe_payload[k] = v
 
+        # Pull a few useful fields from the response envelope (if present).
+        choices_len = None
+        finish_reason = None
+        usage = None
+        if isinstance(envelope, dict):
+            try:
+                choices = envelope.get("choices") or []
+                if isinstance(choices, list):
+                    choices_len = len(choices)
+                    if choices:
+                        finish_reason = (choices[0] or {}).get("finish_reason")
+                usage = envelope.get("usage")
+            except Exception:
+                pass
+
         dump = {
             "kind": kind,
             "attempt": attempt + 1,
             "model": MODEL,
             "temperature": (payload or {}).get("temperature"),
             "max_tokens": (payload or {}).get("max_tokens"),
+            "choices_len": choices_len,
+            "finish_reason": finish_reason,
+            "usage": usage,
             "http_status": http_status,
             "content_preview": _trim(content, 4000),
             "http_text_preview": _trim(http_text, 4000),
@@ -410,20 +430,28 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
     if not API_KEY:
         raise RuntimeError("MOONSHOT_API_KEY is not set")
 
+    is_kimi = "kimi" in (MODEL or "").lower()
+
     temp = temperature
-    if "kimi" in (MODEL or "").lower():
+    if is_kimi:
         temp = 1
 
-    payload = {
+    payload: Dict[str, Any] = {
         "model": MODEL,
         "temperature": temp,
         "max_tokens": max_tokens,
-        "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
     }
+
+    # Kimi K2.5 has been observed to occasionally return empty content when
+    # strict/structured response modes are enabled. For factory stability we
+    # hard-disable response_format for Kimi models.
+    use_response_format = (os.getenv("KIMI_USE_RESPONSE_FORMAT", "1").strip().lower() not in ("0", "false", "no"))
+    if use_response_format and not is_kimi:
+        payload["response_format"] = {"type": "json_object"}
 
     last_err = None
     for attempt in range(HTTP_MAX_TRIES):
@@ -501,9 +529,13 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
             except json.JSONDecodeError as e:
                 # Tighten prompt + reduce temperature and retry.
                 last_err = f"Model JSON decode error: {e}"
-                preview = (content or "").strip().replace("\n", " ")[:240]
+                preview = (content or "").strip().replace("
+", " ")[:240]
+                is_empty = (preview == "")
                 print(f"Model returned non-JSON content (attempt {attempt+1}/{HTTP_MAX_TRIES}): {preview}")
                 _safe_write_kimi_dump("json_decode", attempt, content=content, envelope=data, http_status=r.status_code, http_text=r.text, payload=payload)
+                if is_empty:
+                    _safe_write_kimi_dump("empty_content", attempt, content=content, envelope=data, http_status=r.status_code, http_text=r.text, payload=payload)
 
                 # Strengthen system instruction once; keep idempotent.
                 payload["messages"][0]["content"] = (
@@ -518,8 +550,12 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
                     payload["temperature"] = min(payload.get("temperature", 1.0), 0.2)
                 if attempt == HTTP_MAX_TRIES - 1:
                     raise
-                sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
-                print(f"Retrying after non-JSON output in {sleep:.1f}s")
+                if is_empty:
+                    sleep = min(float(EMPTY_BACKOFF_CAP), (float(EMPTY_BACKOFF_BASE) ** attempt) + (random.random() * 0.2))
+                    print(f"Retrying after empty output in {sleep:.1f}s")
+                else:
+                    sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
+                    print(f"Retrying after non-JSON output in {sleep:.1f}s")
                 time.sleep(sleep)
                 continue
 
