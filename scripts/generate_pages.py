@@ -680,9 +680,7 @@ def generate_one_page(title: str, system: str, page_prompt: str, cfg: dict, pinn
         extra += f"\nPage type (must use exactly): {pinned_page_type}"
 
     try:
-        resp = call_kimi(system, f"{page_prompt}
-
-Title: {title}{extra}")
+        resp = call_kimi(system, f"{page_prompt}\n\nTitle: {title}{extra}")
         data = resp if isinstance(resp, dict) else parse_json_strict_or_extract(str(resp))
     except Exception:
         return False, {}
