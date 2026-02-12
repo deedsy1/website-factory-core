@@ -137,7 +137,7 @@ def resolve_site_config_path() -> str:
     """Prefer the single contract at data/site.yaml.
     Backward compatible: fall back to scripts/site_config.yaml if needed.
     """
-    p = SITE_CONFIG_PATH
+    p = (os.getenv("SITE_CONFIG_PATH") or "data/site.yaml").strip()
     if os.path.isfile(p):
         return p
     fallback = "scripts/site_config.yaml"
@@ -433,7 +433,7 @@ def build_internal_link_hints(content_root: str = "content/pages", limit: int = 
             raw = md.read_text(encoding="utf-8")
         except Exception:
             continue
-        fm, _ = read_frontmatter(raw)
+        fm, _ = read_markdown_frontmatter(raw)
         slug = fm.get("slug") or md.parent.name
         title = fm.get("title") or slug.replace("-", " ").title()
         items.append((str(title).strip(), str(slug).strip()))
@@ -680,8 +680,10 @@ def generate_one_page(title: str, system: str, page_prompt: str, cfg: dict, pinn
         extra += f"\nPage type (must use exactly): {pinned_page_type}"
 
     try:
-        raw = call_kimi(system, f"{page_prompt}\n\nTitle: {title}{extra}")
-        data = parse_json_strict_or_extract(raw)
+        resp = call_kimi(system, f"{page_prompt}
+
+Title: {title}{extra}")
+        data = resp if isinstance(resp, dict) else parse_json_strict_or_extract(str(resp))
     except Exception:
         return False, {}
 
@@ -727,7 +729,7 @@ def write_page(slug: str, data: dict, close: str, contract_hash: str, prompt_has
         "summary": summary,
         "hub": hub,
         "page_type": page_type,
-        "date": data.get("date") or datetime.date.today().isoformat(),
+        "date": data.get("date") or date.today().isoformat(),
         "draft": False,
         "ai": {
             "contract_hash": contract_hash,
