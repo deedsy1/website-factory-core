@@ -122,12 +122,12 @@ except Exception:
 if TEMPERATURE != 1:
     TEMPERATURE = 1
 
-HTTP_MAX_TRIES = int(os.getenv("KIMI_HTTP_MAX_TRIES", "6"))
-BACKOFF_BASE = float(os.getenv("KIMI_BACKOFF_BASE", "1.7"))
+HTTP_MAX_TRIES = int(os.getenv("HTTP_MAX_TRIES", os.getenv("KIMI_HTTP_MAX_TRIES", "6")))
+BACKOFF_BASE = float(os.getenv("BACKOFF_BASE", os.getenv("KIMI_BACKOFF_BASE", "1.7")))
 
 # Faster backoff for "empty content" failures (provider hiccup / strict-mode edge cases).
-EMPTY_BACKOFF_BASE = float(os.getenv("KIMI_EMPTY_BACKOFF_BASE", "1.25"))
-EMPTY_BACKOFF_CAP = float(os.getenv("KIMI_EMPTY_BACKOFF_CAP", "3.0"))
+EMPTY_BACKOFF_BASE = float(os.getenv("EMPTY_BACKOFF_BASE", os.getenv("KIMI_EMPTY_BACKOFF_BASE", "1.25")))
+EMPTY_BACKOFF_CAP = float(os.getenv("EMPTY_BACKOFF_CAP", os.getenv("KIMI_EMPTY_BACKOFF_CAP", "3.0")))
 
 SITE_PATH = Path(os.getenv("SITE_CONFIG", "data/site.yaml"))
 HUGO_PATH = Path("hugo.yaml")
@@ -324,94 +324,6 @@ def _safe_write_kimi_dump(
 
 
 def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int = 1400) -> dict:
-<<<<<<< HEAD
-    """Call Moonshot chat/completions and return a parsed JSON object.
-
-    This function is hardened against:
-      - empty content responses
-      - tool_call-only responses
-      - code fences / prose wrapping
-      - provider envelope shape drift
-
-    For Kimi models, we DO NOT send response_format by default to avoid
-    strict-mode/schema edge cases that can yield empty content.
-    """
-    if not API_KEY:
-        raise RuntimeError("MOONSHOT_API_KEY is not set")
-
-    is_kimi = "kimi" in (MODEL or "").lower()
-
-    # Some Kimi models only accept temperature=1.
-    temp = 1 if is_kimi else float(temperature)
-
-    force_response_format = (os.getenv("KIMI_FORCE_RESPONSE_FORMAT") or "").strip() in ("1", "true", "yes", "on")
-
-    payload: Dict[str, Any] = {
-        "model": MODEL,
-        "temperature": temp,
-        "max_tokens": int(max_tokens),
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    }
-
-    # Only include response_format when explicitly forced and NOT on Kimi.
-    if force_response_format and not is_kimi:
-        payload["response_format"] = {"type": "json_object"}
-
-    def _as_text(v: Any) -> str:
-        if v is None:
-            return ""
-        if isinstance(v, str):
-            return v
-        if isinstance(v, (dict, list)):
-            try:
-                return json.dumps(v, ensure_ascii=False)
-            except Exception:
-                return str(v)
-        return str(v)
-
-    def _extract_content(data: Dict[str, Any]) -> str:
-        choices = data.get("choices") or []
-        if not choices:
-            return ""
-        msg = (choices[0] or {}).get("message") or {}
-        content = msg.get("content")
-
-        # OpenAI-style parts array
-        if isinstance(content, list):
-            parts = []
-            for part in content:
-                if isinstance(part, dict):
-                    if isinstance(part.get("text"), str):
-                        parts.append(part["text"])
-                    elif isinstance(part.get("content"), str):
-                        parts.append(part["content"])
-                elif isinstance(part, str):
-                    parts.append(part)
-            content = "".join(parts)
-
-        # tool_calls / function_call arguments
-        if not _as_text(content).strip():
-            tool_calls = msg.get("tool_calls") or []
-            if isinstance(tool_calls, list) and tool_calls:
-                fn = (tool_calls[0].get("function") or {})
-                content = fn.get("arguments") or ""
-
-        if not _as_text(content).strip():
-            fn_call = (msg.get("function_call") or {})
-            content = fn_call.get("arguments") or ""
-
-        if not _as_text(content).strip() and isinstance(msg.get("json"), (dict, str)):
-            content = msg.get("json")
-
-        return _as_text(content).strip()
-
-    last_err: Optional[str] = None
-
-    for attempt in range(HTTP_MAX_TRIES):
-=======
     """Request a JSON object from the configured LLM provider.
 
     Backwards-compatible name: older workflows/scripts call `kimi_json()`.
@@ -503,7 +415,6 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
                 return ""
 
         # Moonshot/OpenAI-style: choices[0].message.content (+ tool calls)
->>>>>>> b34956a (feat: switch LLM provider to Gemini)
         try:
             msg = (data.get("choices", [{}])[0].get("message") or {})
             content = msg.get("content")
@@ -558,101 +469,36 @@ def kimi_json(system: str, user: str, temperature: float = 1.0, max_tokens: int 
             time.sleep(sleep)
             continue
 
-<<<<<<< HEAD
-        # Retryable HTTP status
-        if r.status_code in (408, 429, 500, 502, 503, 504):
-            last_err = f"HTTP {r.status_code}: {r.text[:4000]}"
-            _safe_write_kimi_dump("http_retry", attempt, content="", envelope=None, http_status=r.status_code, http_text=r.text, payload=payload)
-            if attempt == HTTP_MAX_TRIES - 1:
-=======
         # Retryable HTTP status codes
         if r.status_code in (408, 429, 500, 502, 503, 504):
             last_err = f"HTTP {r.status_code}: {r.text[:2000]}"
             _safe_write_kimi_dump(f"{provider}_http_{r.status_code}", attempt, content="", envelope=None, http_status=r.status_code, http_text=r.text, payload=payload)
             if attempt == http_max_tries - 1:
->>>>>>> b34956a (feat: switch LLM provider to Gemini)
                 break
             sleep = _sleep(attempt)
             print(f"HTTP {r.status_code} — retrying in {sleep:.1f}s")
             time.sleep(sleep)
             continue
 
-<<<<<<< HEAD
-        # Non-retryable HTTP errors
-        if r.status_code >= 400:
-            last_err = f"HTTP {r.status_code}: {r.text[:4000]}"
-            _safe_write_kimi_dump("http_error", attempt, http_status=r.status_code, http_text=r.text, payload=payload)
-            break
-
-        # Success HTTP; parse envelope
-=======
         if r.status_code >= 400:
             last_err = f"HTTP {r.status_code}: {r.text[:2000]}"
             _safe_write_kimi_dump(f"{provider}_http_error", attempt, content="", envelope=None, http_status=r.status_code, http_text=r.text, payload=payload)
             break
 
         # Parse provider envelope
->>>>>>> b34956a (feat: switch LLM provider to Gemini)
         try:
             data = r.json()
         except Exception as e:
             last_err = f"Bad JSON response envelope: {type(e).__name__}: {e}"
-<<<<<<< HEAD
-            _safe_write_kimi_dump("bad_envelope", attempt, http_status=r.status_code, http_text=r.text, payload=payload)
-            if attempt == HTTP_MAX_TRIES - 1:
-                raise
-            sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
-=======
             _safe_write_kimi_dump(f"{provider}_bad_envelope", attempt, content="", envelope=None, http_status=r.status_code, http_text=r.text, payload=payload)
             if attempt == http_max_tries - 1:
                 raise
             sleep = _sleep(attempt)
->>>>>>> b34956a (feat: switch LLM provider to Gemini)
             print(f"Response parse error — retrying in {sleep:.1f}s")
             time.sleep(sleep)
             continue
 
-<<<<<<< HEAD
-        content_text = _extract_content(data)
-
-        # Empty content is a known provider hiccup mode; treat as retryable with FAST backoff.
-        if not content_text:
-            last_err = "Empty model output"
-            _safe_write_kimi_dump("empty_content", attempt, content="", envelope=data, http_status=r.status_code, http_text=r.text, payload=payload)
-            if attempt == HTTP_MAX_TRIES - 1:
-                # Raise JSONDecodeError to reuse caller's existing handling
-                raise json.JSONDecodeError("Empty model output (expected JSON object)", "", 0)
-            sleep = min(EMPTY_BACKOFF_CAP, (EMPTY_BACKOFF_BASE ** attempt) + (random.random() * 0.25))
-            print(f"Model returned empty output (attempt {attempt+1}/{HTTP_MAX_TRIES}) — retrying in {sleep:.1f}s")
-            time.sleep(sleep)
-            continue
-
-        try:
-            return parse_json_strict_or_extract(content_text)
-        except json.JSONDecodeError as e:
-            last_err = f"Model JSON decode error: {e}"
-            preview = (content_text or "").strip().replace("\n", " ")[:240]
-            print(f"Model returned non-JSON content (attempt {attempt+1}/{HTTP_MAX_TRIES}): {preview}")
-            _safe_write_kimi_dump("json_decode", attempt, content=content_text, envelope=data, http_status=r.status_code, http_text=r.text, payload=payload)
-
-            # Strengthen system instruction once; keep idempotent.
-            payload["messages"][0]["content"] = (
-                system
-                + "\n\nCRITICAL: Output MUST be a single valid JSON object. "
-                  "No markdown. No code fences. No commentary."
-            )
-            # Keep temperature safe
-            payload["temperature"] = 1 if is_kimi else min(float(payload.get("temperature", 1.0)), 0.2)
-
-            if attempt == HTTP_MAX_TRIES - 1:
-                raise
-            sleep = min(60.0, (BACKOFF_BASE ** attempt) + random.random())
-            print(f"Retrying after non-JSON output in {sleep:.1f}s")
-            time.sleep(sleep)
-            continue
-=======
         content = _extract_text_from_response(provider, data)
->>>>>>> b34956a (feat: switch LLM provider to Gemini)
 
         if not str(content).strip():
             last_err = "Empty model output"

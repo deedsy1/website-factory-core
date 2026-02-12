@@ -105,6 +105,31 @@ def _llm_provider() -> str:
     return ""
 
 PROVIDER = _llm_provider()
+# --- Runtime knobs (shared across providers) -----------------------------
+# These are set by GitHub Actions env and also work locally.
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "180"))
+CONNECT_TIMEOUT = int(os.getenv("CONNECT_TIMEOUT", "20"))
+
+# Default keeps responses reasonably small & cheap. Override per workflow/run.
+MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1600"))
+
+# Temperature: keep legacy behaviour (some older providers reject non-1 ints).
+try:
+    _t_raw = os.getenv("TEMPERATURE", "1").strip()
+    TEMPERATURE = int(float(_t_raw))
+except Exception:
+    TEMPERATURE = 1
+
+# Hard safety clamp (keeps CI moving even if provider rejects non-1 values)
+if TEMPERATURE != 1:
+    TEMPERATURE = 1
+
+# Retry/backoff knobs (support both the new generic names and legacy KIMI_* names)
+HTTP_MAX_TRIES = int(os.getenv("HTTP_MAX_TRIES", os.getenv("KIMI_HTTP_MAX_TRIES", "6")))
+BACKOFF_BASE = float(os.getenv("BACKOFF_BASE", os.getenv("KIMI_BACKOFF_BASE", "1.7")))
+
+EMPTY_BACKOFF_BASE = float(os.getenv("EMPTY_BACKOFF_BASE", os.getenv("KIMI_EMPTY_BACKOFF_BASE", "1.25")))
+EMPTY_BACKOFF_CAP = float(os.getenv("EMPTY_BACKOFF_CAP", os.getenv("KIMI_EMPTY_BACKOFF_CAP", "3.0")))
 
 # Headers are provider-specific. Never print keys.
 HEADERS = {"Content-Type": "application/json"}
