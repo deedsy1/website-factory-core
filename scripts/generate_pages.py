@@ -76,6 +76,45 @@ def _sr(rel: str) -> Path:
     return (SITE_ROOT / rel).resolve()
 
 
+# --- Paths & runtime knobs --------------------------------------------
+# SITE_ROOT is the per-site working directory (e.g. thin-repo/sites/<slug>).
+# Keep all paths relative to that folder to avoid surprises in CI.
+CONTENT_ROOT: Path = _sr("content")
+DATA_DIR: Path = _sr("data")
+SCRIPTS_DIR: Path = _sr("scripts")
+
+# Common files written by bootstrap / consumed by generator
+SITE_CONFIG_PATH_DEFAULT: Path = DATA_DIR / "site.yaml"
+TITLES_POOL_PATH: Path = SCRIPTS_DIR / "titles_pool.txt"
+MANIFEST_PATH: Path = SCRIPTS_DIR / "manifest.json"
+PLAN_PATH: Path = DATA_DIR / "plan.yaml"
+
+# Diagnostics / retry bookkeeping
+FAILED_TITLES_PATH: Path = SCRIPTS_DIR / "failed_titles.tsv"
+RETRY_TITLES_PATH: Path = SCRIPTS_DIR / "retry_titles.tsv"
+
+# Generation behavior
+GEN_VERSION: str = os.getenv("GEN_VERSION", "1")
+FACTORY_MODE: str = (os.getenv("FACTORY_MODE", "generate") or "generate").strip().lower()
+BACKFILL_METADATA: bool = (os.getenv("BACKFILL_METADATA", "0").strip() == "1")
+FAIL_STOP: bool = (os.getenv("FAIL_STOP", "1").strip() == "1")
+
+# Retry / pacing
+HTTP_MAX_TRIES: int = int(os.getenv("HTTP_MAX_TRIES", os.getenv("KIMI_HTTP_MAX_TRIES", "6")))
+BACKOFF_BASE: float = float(os.getenv("BACKOFF_BASE", os.getenv("KIMI_BACKOFF_BASE", "1.7")))
+MAX_ATTEMPTS: int = int(os.getenv("MAX_ATTEMPTS", "25"))
+SLEEP_SECONDS: float = float(os.getenv("SLEEP_SECONDS", "0.3"))
+
+# Per-run limits
+PAGES_PER_RUN: int = int(os.getenv("PAGES_PER_RUN", "5"))
+PER_TITLE_CAP: int = int(os.getenv("PER_TITLE_CAP", "2"))
+
+# Regen filters (optional)
+REGEN_RULE: str = (os.getenv("REGEN_RULE", "") or "").strip()
+REGEN_HUB: str = (os.getenv("REGEN_HUB", "") or "").strip()
+REGEN_SLUGS: str = (os.getenv("REGEN_SLUGS", "") or "").strip()
+
+
 # --- LLM provider configuration ----------------------------------------
 # We support multiple providers. The factory will prefer Gemini if GEMINI_API_KEY
 # is present; otherwise it falls back to Moonshot (Kimi) for backwards-compat.
